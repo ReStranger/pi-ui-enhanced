@@ -23,30 +23,6 @@ export function setEditorStatusLabel(state: {
   }
 }
 
-function buildBorderLine(
-  width: number,
-  left: string,
-  right: string,
-  borderColor: (text: string) => string,
-  label?: string,
-): string {
-  if (width <= 0) return "";
-  if (width === 1) return borderColor(left);
-
-  const innerWidth = Math.max(0, width - 2);
-  if (!label) {
-    return borderColor(`${left}${"─".repeat(innerWidth)}${right}`);
-  }
-
-  const fittedLabel = truncateToWidth(label, innerWidth);
-  const remaining = Math.max(0, innerWidth - visibleWidth(fittedLabel));
-  const rightFill = Math.min(2, remaining);
-  const leftFill = Math.max(0, remaining - rightFill);
-  return borderColor(
-    `${left}${"─".repeat(leftFill)}${fittedLabel}${"─".repeat(rightFill)}${right}`,
-  );
-}
-
 function buildBoxedContentLine(
   width: number,
   content: string,
@@ -93,16 +69,46 @@ function buildStatusBorderLine(
   );
 }
 
-function isBaseEditorBorderLine(line: string): boolean {
-  const plain = stripTerminalSequences(line);
-  return /^─+$/.test(plain) || /^─── [↑↓] \d+ more ─*$/.test(plain);
+function buildBorderFromBaseLine(
+  width: number,
+  left: string,
+  right: string,
+  content: string,
+  borderColor: (text: string) => string,
+): string {
+  if (width <= 0) return "";
+  if (width === 1) return borderColor(left);
+  if (width === 2) return borderColor(`${left}${right}`);
+
+  const innerWidth = Math.max(0, width - 2);
+  const plain = stripTerminalSequences(content);
+  const truncated = truncateToWidth(plain, innerWidth);
+  const fill = "─".repeat(Math.max(0, innerWidth - visibleWidth(truncated)));
+  return borderColor(`${left}${truncated}${fill}${right}`);
 }
 
-function findBottomBorderIndex(lines: string[]): number {
-  for (let index = lines.length - 1; index > 0; index -= 1) {
-    if (isBaseEditorBorderLine(lines[index] ?? "")) return index;
-  }
-  return lines.length - 1;
+function isPlainBorderLine(line: string): boolean {
+  return /^─+$/.test(stripTerminalSequences(line));
+}
+
+function hasBorderMetadata(line: string): boolean {
+  return !isPlainBorderLine(line);
+}
+
+function getAutocompleteLineCount(editor: CustomEditor, width: number): number {
+  if (!editor.isShowingAutocomplete()) return 0;
+
+  // SAFETY: the runtime editor instance is the pi TUI Editor subclass, which
+  // carries a private `autocompleteList` field. TypeScript hides that field
+  // from us, but reading it here is safe and lets us match the base editor's
+  // rendered autocomplete line count exactly.
+  const autocompleteList = (
+    editor as unknown as {
+      autocompleteList?: { render(renderWidth: number): string[] };
+    }
+  ).autocompleteList;
+
+  return autocompleteList?.render(width).length ?? 0;
 }
 
 export class RoundedEditor extends CustomEditor {
@@ -112,28 +118,44 @@ export class RoundedEditor extends CustomEditor {
     if (lines.length < 2) return lines;
 
     const borderColor = (text: string) => this.borderColor(text);
-    const bottomBorderIndex = findBottomBorderIndex(lines);
+    const autocompleteLineCount = getAutocompleteLineCount(this, innerWidth);
+    const bottomBorderIndex = Math.max(
+      1,
+      Math.min(lines.length - 1, lines.length - autocompleteLineCount - 1),
+    );
     const extra = lines.slice(bottomBorderIndex + 1);
-    const hasAutocomplete = extra.length > 0;
+    const hasAutocomplete = autocompleteLineCount > 0;
     const separator = hasAutocomplete
       ? [buildStatusBorderLine(width, "├", "┤", borderColor)]
       : [];
-    const bottomBorder = hasAutocomplete
-      ? buildBorderLine(width, "╰", "╯", borderColor)
-      : buildStatusBorderLine(width, "╰", "╯", borderColor);
+    const topBorder = buildBorderFromBaseLine(
+      width,
+      "╭",
+      "╮",
+      lines[0] ?? "",
+      borderColor,
+    );
+    const bottomBorderLine = lines[bottomBorderIndex] ?? "";
+    let bottomBorder = buildStatusBorderLine(width, "╰", "╯", borderColor);
+
+    if (hasAutocomplete || hasBorderMetadata(bottomBorderLine)) {
+      bottomBorder = buildBorderFromBaseLine(
+        width,
+        "╰",
+        "╯",
+        bottomBorderLine,
+        borderColor,
+      );
+    }
 
     return [
-      buildBorderLine(width, "╭", "╮", borderColor),
+      topBorder,
       ...lines
         .slice(1, bottomBorderIndex)
         .map((line) => buildBoxedContentLine(width, line ?? "", borderColor)),
       ...separator,
       ...extra.map((line) =>
-        buildBoxedContentLine(
-          width,
-          truncateToWidth(line, innerWidth),
-          borderColor,
-        ),
+        buildBoxedContentLine(width, line ?? "", borderColor),
       ),
       bottomBorder,
     ];
