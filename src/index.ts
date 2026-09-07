@@ -114,26 +114,28 @@ export class RoundedEditor extends CustomEditor {
     const borderColor = (text: string) => this.borderColor(text);
     const bottomBorderIndex = findBottomBorderIndex(lines);
     const extra = lines.slice(bottomBorderIndex + 1);
-
-    lines[0] = buildBorderLine(width, "╭", "╮", borderColor);
-    lines[bottomBorderIndex] = buildStatusBorderLine(
-      width,
-      "╰",
-      "╯",
-      borderColor,
-    );
-
-    for (let index = 1; index < bottomBorderIndex; index += 1) {
-      lines[index] = buildBoxedContentLine(
-        width,
-        lines[index] ?? "",
-        borderColor,
-      );
-    }
+    const hasAutocomplete = extra.length > 0;
+    const separator = hasAutocomplete
+      ? [buildStatusBorderLine(width, "├", "┤", borderColor)]
+      : [];
+    const bottomBorder = hasAutocomplete
+      ? buildBorderLine(width, "╰", "╯", borderColor)
+      : buildStatusBorderLine(width, "╰", "╯", borderColor);
 
     return [
-      ...lines.slice(0, bottomBorderIndex + 1),
-      ...extra.map((line) => ` ${truncateToWidth(line, innerWidth)}`),
+      buildBorderLine(width, "╭", "╮", borderColor),
+      ...lines
+        .slice(1, bottomBorderIndex)
+        .map((line) => buildBoxedContentLine(width, line ?? "", borderColor)),
+      ...separator,
+      ...extra.map((line) =>
+        buildBoxedContentLine(
+          width,
+          truncateToWidth(line, innerWidth),
+          borderColor,
+        ),
+      ),
+      bottomBorder,
     ];
   }
 }
