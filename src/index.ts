@@ -64,8 +64,10 @@ function buildStatusBorderLine(
     Math.max(0, rightWidth - visibleWidth(rightLabel)),
   );
 
-  return borderColor(
-    `${left}${leftFill}${leftLabel}•${rightLabel}${rightFill}${right}`,
+  const leftSegment = `${left}${leftFill}${leftLabel}`;
+  const middleSegment = `•${rightLabel}${rightFill}`;
+  return (
+    borderColor(leftSegment) + borderColor(middleSegment) + borderColor(right)
   );
 }
 
