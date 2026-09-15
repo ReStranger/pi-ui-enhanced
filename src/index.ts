@@ -19,7 +19,7 @@ let isWorking = false;
 let spinnerIndex = 0;
 let spinnerTimer: ReturnType<typeof setInterval> | undefined;
 let activeTui: TUI | undefined;
-const STATUS_SEPARATOR_RATIO = 0.9;
+const STATUS_THINKING_WIDTH = 9;
 const WORKING_MESSAGE = "Working";
 const BORDER_MIN_GAP = 3;
 const WORKING_SPINNER_INTERVAL_MS = 80;
@@ -112,11 +112,11 @@ function buildStatusBorderLine(
   if (width === 2) return borderColor(`${left}${right}`);
 
   const innerWidth = Math.max(0, width - 2);
-  const leftWidth = Math.min(
+  const rightWidth = Math.min(
     Math.max(0, innerWidth - 1),
-    Math.floor(innerWidth * STATUS_SEPARATOR_RATIO),
+    STATUS_THINKING_WIDTH,
   );
-  const rightWidth = Math.max(0, innerWidth - leftWidth - 1);
+  const leftWidth = Math.max(0, innerWidth - rightWidth - 1);
   const leftLabel = truncateToWidth(` ${currentModelId} `, leftWidth, "");
   const rightLabel = truncateToWidth(
     ` ${currentThinkingLevel} `,
