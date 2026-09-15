@@ -1,15 +1,40 @@
 export type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import {
+  CustomEditor,
+  type KeybindingsManager,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
 import {
   stripTerminalSequences,
   truncateToWidth,
+  type EditorTheme,
+  type TUI,
   visibleWidth,
 } from "@earendil-works/pi-tui";
 
 let currentModelId = "pi";
 let currentThinkingLevel = "off";
+let isWorking = false;
+let spinnerIndex = 0;
+let spinnerTimer: ReturnType<typeof setInterval> | undefined;
+let activeTui: TUI | undefined;
 const STATUS_SEPARATOR_RATIO = 0.9;
+const WORKING_MESSAGE = "Working";
+const BORDER_MIN_GAP = 3;
+const WORKING_SPINNER_INTERVAL_MS = 80;
+const WORKING_SPINNER_FRAMES = [
+  "⠋",
+  "⠙",
+  "⠹",
+  "⠸",
+  "⠼",
+  "⠴",
+  "⠦",
+  "⠧",
+  "⠇",
+  "⠏",
+];
 
 export function setEditorStatusLabel(state: {
   modelId?: string;
@@ -21,6 +46,45 @@ export function setEditorStatusLabel(state: {
   if (typeof state.thinkingLevel === "string") {
     currentThinkingLevel = state.thinkingLevel.trim() || "off";
   }
+}
+
+function stopWorkingSpinner(): void {
+  if (!spinnerTimer) return;
+
+  clearInterval(spinnerTimer);
+  spinnerTimer = undefined;
+}
+
+export function setEditorWorking(working: boolean): void {
+  const wasWorking = isWorking;
+  isWorking = working;
+
+  if (!working) {
+    spinnerIndex = 0;
+    stopWorkingSpinner();
+    activeTui?.requestRender();
+    return;
+  }
+
+  if (!wasWorking) {
+    spinnerIndex = 0;
+  }
+
+  if (!spinnerTimer) {
+    spinnerTimer = setInterval(() => {
+      spinnerIndex = (spinnerIndex + 1) % WORKING_SPINNER_FRAMES.length;
+      activeTui?.requestRender();
+    }, WORKING_SPINNER_INTERVAL_MS);
+  }
+
+  activeTui?.requestRender();
+}
+
+export function resetEditorWorkingState(): void {
+  isWorking = false;
+  spinnerIndex = 0;
+  stopWorkingSpinner();
+  activeTui = undefined;
 }
 
 function buildBoxedContentLine(
@@ -71,6 +135,91 @@ function buildStatusBorderLine(
   );
 }
 
+function fitBorderLine(
+  width: number,
+  left: string,
+  right: string,
+  leftText: string,
+  rightText: string,
+  borderColor: (text: string) => string,
+  fillColor: (text: string) => string = borderColor,
+): string {
+  if (width <= 0) return "";
+  if (width === 1) return borderColor(left);
+  if (width === 2) return borderColor(`${left}${right}`);
+
+  const fixedWidth = 2;
+  let fittedLeft = leftText;
+  let fittedRight = rightText;
+
+  while (
+    fixedWidth +
+      visibleWidth(fittedLeft) +
+      visibleWidth(fittedRight) +
+      BORDER_MIN_GAP >
+      width &&
+    visibleWidth(fittedRight) > 0
+  ) {
+    fittedRight = truncateToWidth(
+      fittedRight,
+      Math.max(0, visibleWidth(fittedRight) - 1),
+      "",
+    );
+  }
+
+  while (
+    fixedWidth +
+      visibleWidth(fittedLeft) +
+      visibleWidth(fittedRight) +
+      BORDER_MIN_GAP >
+      width &&
+    visibleWidth(fittedLeft) > 0
+  ) {
+    fittedLeft = truncateToWidth(
+      fittedLeft,
+      Math.max(0, visibleWidth(fittedLeft) - 1),
+      "",
+    );
+  }
+
+  const gapWidth = Math.max(
+    0,
+    width - fixedWidth - visibleWidth(fittedLeft) - visibleWidth(fittedRight),
+  );
+
+  return (
+    borderColor(left) +
+    fittedLeft +
+    fillColor("─".repeat(gapWidth)) +
+    fittedRight +
+    borderColor(right)
+  );
+}
+
+function buildWorkingBorderLine(
+  width: number,
+  left: string,
+  right: string,
+  borderColor: (text: string) => string,
+  theme: Pick<Theme, "fg">,
+): string {
+  const spinner = theme.fg(
+    "accent",
+    WORKING_SPINNER_FRAMES[spinnerIndex] ?? "•",
+  );
+  const message = theme.fg("muted", WORKING_MESSAGE);
+  const leadingGap = borderColor("─");
+
+  return fitBorderLine(
+    width,
+    left,
+    right,
+    `${leadingGap} ${spinner} ${message} `,
+    "",
+    borderColor,
+  );
+}
+
 function buildBorderFromBaseLine(
   width: number,
   left: string,
@@ -114,6 +263,16 @@ function getAutocompleteLineCount(editor: CustomEditor, width: number): number {
 }
 
 export class RoundedEditor extends CustomEditor {
+  constructor(
+    tui: TUI,
+    theme: EditorTheme,
+    keybindings: KeybindingsManager,
+    private readonly statusTheme: Pick<Theme, "fg">,
+  ) {
+    super(tui, theme, keybindings);
+    activeTui = tui;
+  }
+
   render(width: number): string[] {
     const innerWidth = Math.max(0, width - 2);
     const lines = super.render(innerWidth);
@@ -130,15 +289,26 @@ export class RoundedEditor extends CustomEditor {
     const separator = hasAutocomplete
       ? [buildStatusBorderLine(width, "├", "┤", borderColor)]
       : [];
-    const topBorder = buildBorderFromBaseLine(
+    const topBorderLine = lines[0] ?? "";
+    let topBorder = buildBorderFromBaseLine(
       width,
       "╭",
       "╮",
-      lines[0] ?? "",
+      topBorderLine,
       borderColor,
     );
     const bottomBorderLine = lines[bottomBorderIndex] ?? "";
     let bottomBorder = buildStatusBorderLine(width, "╰", "╯", borderColor);
+
+    if (isWorking && !hasBorderMetadata(topBorderLine)) {
+      topBorder = buildWorkingBorderLine(
+        width,
+        "╭",
+        "╮",
+        borderColor,
+        this.statusTheme,
+      );
+    }
 
     if (hasAutocomplete || hasBorderMetadata(bottomBorderLine)) {
       bottomBorder = buildBorderFromBaseLine(
