@@ -4,7 +4,14 @@ import {
   CustomEditor,
   type KeybindingsManager,
   type Theme,
+  type ThemeColor,
 } from "@earendil-works/pi-coding-agent";
+
+// ThinkingLevel lives in @earendil-works/pi-agent-core, which is not a direct
+// dependency here (only nested inside pi-coding-agent) and is not re-exported
+// by pi-coding-agent, so derive it from Theme.getThinkingBorderColor to stay
+// in sync with the core type without adding a dependency.
+type ThinkingLevel = Parameters<Theme["getThinkingBorderColor"]>[0];
 import {
   stripTerminalSequences,
   truncateToWidth,
@@ -36,15 +43,25 @@ const WORKING_SPINNER_FRAMES = [
   "⠏",
 ];
 
+// Blank/missing levels display as "off"; unknown non-blank names are
+// preserved for the status label and narrowed separately for theme lookup.
+function normalizeThinkingLevelLabel(level: string): string {
+  return level.trim() || "off";
+}
+
+export function getCurrentThinkingLevel(): string {
+  return currentThinkingLevel;
+}
+
 export function setEditorStatusLabel(state: {
   modelId?: string;
-  thinkingLevel?: string;
+  thinkingLevel?: ThinkingLevel | string;
 }): void {
   if (typeof state.modelId === "string") {
     currentModelId = state.modelId.trim() || "pi";
   }
   if (typeof state.thinkingLevel === "string") {
-    currentThinkingLevel = state.thinkingLevel.trim() || "off";
+    currentThinkingLevel = normalizeThinkingLevelLabel(state.thinkingLevel);
   }
 }
 
@@ -196,18 +213,72 @@ function fitBorderLine(
   );
 }
 
+// Token mirror of Theme.getThinkingBorderColor (pi-coding-agent,
+// modes/interactive/theme/theme.js): same level -> same thinking* token.
+// Kept as a local token map instead of reusing that method so the working
+// indicator keeps its own default (accent) for unknown levels.
+function thinkingTokenForLevel(level: ThinkingLevel | string): ThemeColor {
+  switch (level.trim().toLowerCase()) {
+    case "off":
+      return "thinkingOff";
+    case "minimal":
+      return "thinkingMinimal";
+    case "low":
+      return "thinkingLow";
+    case "medium":
+      return "thinkingMedium";
+    case "high":
+      return "thinkingHigh";
+    case "xhigh":
+      return "thinkingXhigh";
+    case "max":
+      return "thinkingMax";
+    default:
+      // Intentionally differs from the core default (thinkingOff): accent
+      // preserves the pre-tint spinner styling for unknown levels, and
+      // accent is a required color in every theme, so fg() cannot throw.
+      return "accent";
+  }
+}
+
+// Theme.fg() throws on unknown colors, and thinkingMax is optional in custom
+// themes. Theme itself backfills it (thinkingMax ?? thinkingXhigh, both in
+// the constructor and withThemeColorFallbacks), but statusTheme is only
+// Pick<Theme, "fg">, so probe via getFgAnsi when available and fall back to
+// thinkingXhigh (for max) or accent (guaranteed to exist) instead of
+// crashing the working indicator on a custom theme.
+function thinkingFg(
+  theme: Pick<Theme, "fg"> & Partial<Pick<Theme, "getFgAnsi">>,
+  token: ThemeColor,
+  text: string,
+): string {
+  let resolved = token;
+  try {
+    theme.getFgAnsi?.(token);
+  } catch {
+    resolved = token === "thinkingMax" ? "thinkingXhigh" : "accent";
+  }
+  try {
+    return theme.fg(resolved, text);
+  } catch {
+    return theme.fg("accent", text);
+  }
+}
+
 function buildWorkingBorderLine(
   width: number,
   left: string,
   right: string,
   borderColor: (text: string) => string,
-  theme: Pick<Theme, "fg">,
+  theme: Pick<Theme, "fg"> & Partial<Pick<Theme, "getFgAnsi">>,
 ): string {
-  const spinner = theme.fg(
-    "accent",
+  const reasoning = thinkingTokenForLevel(currentThinkingLevel);
+  const spinner = thinkingFg(
+    theme,
+    reasoning,
     WORKING_SPINNER_FRAMES[spinnerIndex] ?? "•",
   );
-  const message = theme.fg("muted", WORKING_MESSAGE);
+  const message = thinkingFg(theme, reasoning, WORKING_MESSAGE);
   const leadingGap = borderColor("─");
 
   return fitBorderLine(
@@ -260,6 +331,60 @@ function getAutocompleteLineCount(editor: CustomEditor, width: number): number {
   ).autocompleteList;
 
   return autocompleteList?.render(width).length ?? 0;
+}
+
+// Narrow an arbitrary level string to a known ThinkingLevel for
+// Theme.getThinkingBorderColor. Unknown values fall back to "off",
+// mirroring the core default branch, so callers never smuggle an
+// unchecked string through the ThinkingLevel cast.
+function toKnownThinkingLevel(
+  level: ThinkingLevel | string | undefined,
+): ThinkingLevel {
+  switch (typeof level === "string" ? level.trim().toLowerCase() : "off") {
+    case "minimal":
+      return "minimal";
+    case "low":
+      return "low";
+    case "medium":
+      return "medium";
+    case "high":
+      return "high";
+    case "xhigh":
+      return "xhigh";
+    case "max":
+      return "max";
+    case "off":
+    default:
+      return "off";
+  }
+}
+
+// Core seeds every freshly installed custom editor with
+// defaultEditor.borderColor — a snapshot that freezes while a custom editor
+// is active, because updateEditorBorderColor only writes to the displayed
+// editor. After a reload/resume/fork/new session that snapshot is stale, so
+// the frame renders in an old color while the spinner tint resolves live
+// from the current thinking level. Overwrite it here with a live closure so
+// the border matches the current level from the start; later core updates
+// (level/model/bash/branch changes) keep working as usual.
+export function applyLiveThinkingBorderColor(
+  editor: CustomEditor,
+  theme: Theme,
+  thinkingLevel: ThinkingLevel | string | undefined,
+): void {
+  let color: (text: string) => string;
+  try {
+    color = theme.getThinkingBorderColor(toKnownThinkingLevel(thinkingLevel));
+    // getThinkingBorderColor is lazy: it returns a closure over theme.fg(),
+    // which throws on unknown tokens only when invoked. Probe it now so a
+    // custom theme missing newer thinking tokens keeps the host snapshot
+    // instead of crashing render() later.
+    color("");
+  } catch {
+    // Keep the borderColor snapshot provided by the host.
+    return;
+  }
+  editor.borderColor = color;
 }
 
 export class RoundedEditor extends CustomEditor {

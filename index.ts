@@ -1,5 +1,7 @@
 import {
 	RoundedEditor,
+	applyLiveThinkingBorderColor,
+	getCurrentThinkingLevel,
 	resetEditorWorkingState,
 	setEditorStatusLabel,
 	setEditorWorking,
@@ -14,10 +16,17 @@ export default function roundedInputExtension(pi: ExtensionAPI): void {
 			thinkingLevel: ctx.thinkingLevel,
 		});
 		ctx.ui.setWorkingVisible(false);
-		ctx.ui.setEditorComponent(
-			(tui, theme, keybindings) =>
-				new RoundedEditor(tui, theme, keybindings, ctx.ui.theme),
-		);
+		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
+			const editor = new RoundedEditor(tui, theme, keybindings, ctx.ui.theme);
+			// Core seeds new editors with a possibly stale
+			// defaultEditor.borderColor snapshot (frozen while a custom editor
+			// is active). Re-sync it live so the frame matches the spinner.
+			// Read the level from module state at instantiation time, not from
+			// the session_start ctx snapshot, so a level change between
+			// session_start and editor creation cannot leave a stale color.
+			applyLiveThinkingBorderColor(editor, ctx.ui.theme, getCurrentThinkingLevel());
+			return editor;
+		});
 	});
 
 	pi.on("agent_start", () => {
