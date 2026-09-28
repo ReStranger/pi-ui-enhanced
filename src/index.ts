@@ -106,8 +106,9 @@ export function resetEditorWorkingState(): void {
 }
 
 function unrefTimer(timer: ReturnType<typeof setInterval>): void {
-  // Timeouts are plain numbers under the DOM typings and Timeout objects under
-  // Node's; only the latter can be detached from the event loop.
+  // SAFETY: timeouts are plain numbers under the DOM typings and Timeout
+  // objects under Node's; only the latter can be detached from the event
+  // loop, so the optional call is safe under either typing.
   (timer as unknown as { unref?: () => void }).unref?.();
 }
 
@@ -240,6 +241,28 @@ function buildWorkingBorderLine(
   );
 }
 
+function buildRoundedScrollBorder(
+  width: number,
+  hiddenLineCount: number,
+  borderColor: (text: string) => string,
+): string {
+  if (width <= 0) return "";
+  if (width === 1) return borderColor("╭");
+  if (width === 2) return borderColor("╭╮");
+
+  const label = ` ↑ ${hiddenLineCount} more `;
+  const innerWidth = Math.max(0, width - 2);
+  const fitted = truncateToWidth(label, innerWidth, "");
+  const leftFill = Math.max(
+    0,
+    Math.floor((innerWidth - visibleWidth(fitted)) / 2),
+  );
+  const rightFill = Math.max(0, innerWidth - visibleWidth(fitted) - leftFill);
+  return borderColor(
+    `╭${"─".repeat(leftFill)}${fitted}${"─".repeat(rightFill)}╮`,
+  );
+}
+
 function buildBorderFromBaseLine(
   width: number,
   left: string,
@@ -278,19 +301,30 @@ function hasBorderMetadata(line: string): boolean {
   return !isPlainBorderLine(line);
 }
 
-// SAFETY: the runtime editor instance is the pi TUI Editor subclass, which
-// records how many rows it appended for the autocomplete block in a private
-// `renderedAutocompleteHeight` field. TypeScript hides that field from us, but
-// reading it is safe and is the only way to stay in sync with the rows
-// Editor.handleMouse hit-tests: rendering the list a second time here both cost
-// an extra render per frame and measured it on a width the base editor never
-// uses for its own layout.
 function getRenderedAutocompleteHeight(editor: CustomEditor): number {
+  // SAFETY: the runtime editor instance is the pi TUI Editor subclass, which
+  // records how many rows it appended for the autocomplete block in a private
+  // `renderedAutocompleteHeight` field. TypeScript hides that field from us,
+  // but reading it is safe and is the only way to stay in sync with the rows
+  // Editor.handleMouse hit-tests: rendering the list a second time here both
+  // cost an extra render per frame and measured it on a width the base editor
+  // never uses for its own layout.
   const height = (
     editor as unknown as { renderedAutocompleteHeight?: number }
   ).renderedAutocompleteHeight;
 
   return typeof height === "number" ? height : 0;
+}
+
+function getScrollOffset(editor: CustomEditor): number {
+  // SAFETY: the runtime editor instance is the pi TUI Editor subclass, which
+  // keeps the first hidden line index in a private `scrollOffset` field.
+  // TypeScript hides that field from us, but reading it right after
+  // super.render() (which just recomputed it) is safe and matches the hidden
+  // count the base editor used for its own top border.
+  const offset = (editor as unknown as { scrollOffset?: number }).scrollOffset;
+
+  return typeof offset === "number" ? offset : 0;
 }
 
 export class RoundedEditor extends CustomEditor {
@@ -317,13 +351,12 @@ export class RoundedEditor extends CustomEditor {
     const extra = lines.slice(bottomBorderIndex + 1);
     const hasAutocomplete = autocompleteLineCount > 0;
     const topBorderLine = lines[0] ?? "";
-    let topBorder = buildBorderFromBaseLine(
-      width,
-      "╭",
-      "╮",
-      topBorderLine,
-      borderColor,
-    );
+    // A scrolled editor centers its overflow label at the frame width instead
+    // of re-wrapping the base border text rendered at the inner width.
+    const hiddenLineCount = getScrollOffset(this);
+    let topBorder = hiddenLineCount > 0
+      ? buildRoundedScrollBorder(width, hiddenLineCount, borderColor)
+      : buildBorderFromBaseLine(width, "╭", "╮", topBorderLine, borderColor);
     const bottomBorderLine = lines[bottomBorderIndex] ?? "";
 
     if (isWorking && !hasBorderMetadata(topBorderLine)) {
