@@ -253,6 +253,15 @@ function buildBorderFromBaseLine(
   return borderColor(`${left}${truncated}${fill}${right}`);
 }
 
+function buildPlainBorderLine(
+  width: number,
+  left: string,
+  right: string,
+  borderColor: (text: string) => string,
+): string {
+  return buildBorderFromBaseLine(width, left, right, "", borderColor);
+}
+
 function isPlainBorderLine(line: string): boolean {
   return /^─+$/.test(stripTerminalSequences(line));
 }
@@ -354,9 +363,6 @@ export class RoundedEditor extends CustomEditor {
     );
     const extra = lines.slice(bottomBorderIndex + 1);
     const hasAutocomplete = autocompleteLineCount > 0;
-    const separator = hasAutocomplete
-      ? [buildStatusBorderLine(width, "├", "┤", borderColor)]
-      : [];
     const topBorderLine = lines[0] ?? "";
     let topBorder = buildBorderFromBaseLine(
       width,
@@ -366,32 +372,50 @@ export class RoundedEditor extends CustomEditor {
       borderColor,
     );
     const bottomBorderLine = lines[bottomBorderIndex] ?? "";
-    let bottomBorder = buildStatusBorderLine(width, "╰", "╯", borderColor);
 
     if (isWorking && !hasBorderMetadata(topBorderLine)) {
       topBorder = buildWorkingBorderLine(width, "╭", "╮", borderColor);
     }
 
-    if (hasAutocomplete || hasBorderMetadata(bottomBorderLine)) {
-      bottomBorder = buildBorderFromBaseLine(
-        width,
-        "╰",
-        "╯",
-        bottomBorderLine,
-        borderColor,
-      );
+    const content = lines
+      .slice(1, bottomBorderIndex)
+      .map((line) => buildBoxedContentLine(width, line ?? "", borderColor));
+    const suggestions = extra.map((line) =>
+      buildBoxedContentLine(width, line ?? "", borderColor),
+    );
+
+    if (!hasAutocomplete) {
+      const bottomBorder = hasBorderMetadata(bottomBorderLine)
+        ? buildBorderFromBaseLine(
+            width,
+            "╰",
+            "╯",
+            bottomBorderLine,
+            borderColor,
+          )
+        : buildStatusBorderLine(width, "╰", "╯", borderColor);
+      return [topBorder, ...content, bottomBorder];
     }
+
+    // The tee sits in the base bottom-border slot, so the list must keep
+    // starting at renderedVisibleLineCount + 2, where base Editor.handleMouse
+    // hit-tests it. This frame is one row taller than the base editor.
+    const tee = hasBorderMetadata(bottomBorderLine)
+      ? buildBorderFromBaseLine(
+          width,
+          "├",
+          "┤",
+          bottomBorderLine,
+          borderColor,
+        )
+      : buildStatusBorderLine(width, "├", "┤", borderColor);
 
     return [
       topBorder,
-      ...lines
-        .slice(1, bottomBorderIndex)
-        .map((line) => buildBoxedContentLine(width, line ?? "", borderColor)),
-      ...separator,
-      ...extra.map((line) =>
-        buildBoxedContentLine(width, line ?? "", borderColor),
-      ),
-      bottomBorder,
+      ...content,
+      tee,
+      ...suggestions,
+      buildPlainBorderLine(width, "╰", "╯", borderColor),
     ];
   }
 }
