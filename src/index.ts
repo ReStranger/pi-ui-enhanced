@@ -7,7 +7,6 @@ import {
   CustomEditor,
   type KeybindingsManager,
   type Theme,
-  type ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 
 // ThinkingLevel lives in @earendil-works/pi-agent-core, which is not a direct
@@ -216,72 +215,14 @@ function fitBorderLine(
   );
 }
 
-// Token mirror of Theme.getThinkingBorderColor (pi-coding-agent,
-// modes/interactive/theme/theme.js): same level -> same thinking* token.
-// Kept as a local token map instead of reusing that method so the working
-// indicator keeps its own default (accent) for unknown levels.
-function thinkingTokenForLevel(level: ThinkingLevel | string): ThemeColor {
-  switch (level.trim().toLowerCase()) {
-    case "off":
-      return "thinkingOff";
-    case "minimal":
-      return "thinkingMinimal";
-    case "low":
-      return "thinkingLow";
-    case "medium":
-      return "thinkingMedium";
-    case "high":
-      return "thinkingHigh";
-    case "xhigh":
-      return "thinkingXhigh";
-    case "max":
-      return "thinkingMax";
-    default:
-      // Intentionally differs from the core default (thinkingOff): accent
-      // preserves the pre-tint spinner styling for unknown levels, and
-      // accent is a required color in every theme, so fg() cannot throw.
-      return "accent";
-  }
-}
-
-// Theme.fg() throws on unknown colors, and thinkingMax is optional in custom
-// themes. Theme itself backfills it (thinkingMax ?? thinkingXhigh, both in
-// the constructor and withThemeColorFallbacks), but statusTheme is only
-// Pick<Theme, "fg">, so probe via getFgAnsi when available and fall back to
-// thinkingXhigh (for max) or accent (guaranteed to exist) instead of
-// crashing the working indicator on a custom theme.
-function thinkingFg(
-  theme: Pick<Theme, "fg"> & Partial<Pick<Theme, "getFgAnsi">>,
-  token: ThemeColor,
-  text: string,
-): string {
-  let resolved = token;
-  try {
-    theme.getFgAnsi?.(token);
-  } catch {
-    resolved = token === "thinkingMax" ? "thinkingXhigh" : "accent";
-  }
-  try {
-    return theme.fg(resolved, text);
-  } catch {
-    return theme.fg("accent", text);
-  }
-}
-
 function buildWorkingBorderLine(
   width: number,
   left: string,
   right: string,
   borderColor: (text: string) => string,
-  theme: Pick<Theme, "fg"> & Partial<Pick<Theme, "getFgAnsi">>,
 ): string {
-  const reasoning = thinkingTokenForLevel(currentThinkingLevel);
-  const spinner = thinkingFg(
-    theme,
-    reasoning,
-    WORKING_SPINNER_FRAMES[spinnerIndex] ?? "•",
-  );
-  const message = thinkingFg(theme, reasoning, WORKING_MESSAGE);
+  const spinner = borderColor(WORKING_SPINNER_FRAMES[spinnerIndex] ?? "•");
+  const message = borderColor(WORKING_MESSAGE);
   const leadingGap = borderColor("─");
 
   return fitBorderLine(
@@ -395,7 +336,6 @@ export class RoundedEditor extends CustomEditor {
     tui: TUI,
     theme: EditorTheme,
     keybindings: KeybindingsManager,
-    private readonly statusTheme: Pick<Theme, "fg">,
   ) {
     super(tui, theme, keybindings);
     activeTui = tui;
@@ -429,13 +369,7 @@ export class RoundedEditor extends CustomEditor {
     let bottomBorder = buildStatusBorderLine(width, "╰", "╯", borderColor);
 
     if (isWorking && !hasBorderMetadata(topBorderLine)) {
-      topBorder = buildWorkingBorderLine(
-        width,
-        "╭",
-        "╮",
-        borderColor,
-        this.statusTheme,
-      );
+      topBorder = buildWorkingBorderLine(width, "╭", "╮", borderColor);
     }
 
     if (hasAutocomplete || hasBorderMetadata(bottomBorderLine)) {

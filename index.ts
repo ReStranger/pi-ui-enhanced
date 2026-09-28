@@ -25,7 +25,7 @@ export default function roundedInputExtension(pi: ExtensionAPI): void {
 		});
 		ctx.ui.setWorkingVisible(false);
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-			const editor = new RoundedEditor(tui, theme, keybindings, ctx.ui.theme);
+			const editor = new RoundedEditor(tui, theme, keybindings);
 			// Core seeds new editors with a possibly stale
 			// defaultEditor.borderColor snapshot (frozen while a custom editor
 			// is active). Re-sync it live so the frame matches the spinner.
