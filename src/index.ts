@@ -80,14 +80,22 @@ export function setEditorWorking(working: boolean): void {
     spinnerIndex = 0;
   }
 
+  // Nothing to animate until a rounded editor is mounted. Without this guard a
+  // subagent-triggered start could spin a timer for a session that never gets
+  // an editor of its own.
+  if (!activeTui) return;
+
   if (!spinnerTimer) {
     spinnerTimer = setInterval(() => {
       spinnerIndex = (spinnerIndex + 1) % WORKING_SPINNER_FRAMES.length;
       activeTui?.requestRender();
     }, WORKING_SPINNER_INTERVAL_MS);
+    // The timer only drives renders, so it must never hold the process open on
+    // its own if it outlives the session that started it.
+    unrefTimer(spinnerTimer);
   }
 
-  activeTui?.requestRender();
+  activeTui.requestRender();
 }
 
 export function resetEditorWorkingState(): void {
@@ -95,6 +103,12 @@ export function resetEditorWorkingState(): void {
   spinnerIndex = 0;
   stopWorkingSpinner();
   activeTui = undefined;
+}
+
+function unrefTimer(timer: ReturnType<typeof setInterval>): void {
+  // Timeouts are plain numbers under the DOM typings and Timeout objects under
+  // Node's; only the latter can be detached from the event loop.
+  (timer as unknown as { unref?: () => void }).unref?.();
 }
 
 function buildBoxedContentLine(
