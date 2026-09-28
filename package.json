@@ -15,6 +15,10 @@
       "./index.ts"
     ]
   },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
@@ -22,6 +26,7 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.87.1",
     "@earendil-works/pi-tui": "^0.87.1",
+    "@types/node": "^24.19.0",
     "typescript": "^5.9.3"
   }
 }
