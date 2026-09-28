@@ -2,7 +2,6 @@ import {
 	RoundedEditor,
 	resetEditorWorkingState,
 	setEditorStatusLabel,
-	setEditorWorking,
 } from "./src/index.ts";
 import type { ExtensionAPI, ExtensionContext } from "./src/index.ts";
 
@@ -21,7 +20,10 @@ export default function roundedInputExtension(pi: ExtensionAPI): void {
 			modelId: ctx.model?.id,
 			thinkingLevel: ctx.thinkingLevel,
 		});
-		ctx.ui.setWorkingVisible(false);
+		// No setWorkingVisible(false) here: with embedWorkingStatus the stock
+		// InteractiveMode routes its working/compaction/retry indicators into
+		// the editor top border itself, so the separate status line below the
+		// editor must stay visible as the fallback surface.
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
 			// No border color is seeded here: core assigns a possibly stale
 			// defaultEditor.borderColor snapshot right after this factory
@@ -32,14 +34,8 @@ export default function roundedInputExtension(pi: ExtensionAPI): void {
 		});
 	});
 
-	pi.on("agent_start", (_event, ctx) => {
-		if (!rendersEditorUi(ctx)) return;
-		setEditorWorking(true);
-	});
-
 	pi.on("agent_settled", (_event, ctx) => {
 		if (!rendersEditorUi(ctx)) return;
-		setEditorWorking(false);
 		setEditorStatusLabel({
 			modelId: ctx.model?.id,
 			thinkingLevel: ctx.thinkingLevel,

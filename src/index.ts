@@ -19,26 +19,19 @@ import {
 
 let currentModelId = "pi";
 let currentThinkingLevel = "off";
-let isWorking = false;
-let spinnerIndex = 0;
-let spinnerTimer: ReturnType<typeof setInterval> | undefined;
 let activeTui: TUI | undefined;
 const STATUS_THINKING_WIDTH = 9;
-const WORKING_MESSAGE = "Working";
-const BORDER_MIN_GAP = 3;
-const WORKING_SPINNER_INTERVAL_MS = 80;
-const WORKING_SPINNER_FRAMES = [
-  "⠋",
-  "⠙",
-  "⠹",
-  "⠸",
-  "⠼",
-  "⠴",
-  "⠦",
-  "⠧",
-  "⠇",
-  "⠏",
-];
+
+/**
+ * Structural view of the stock StatusIndicator (working, retry, compaction,
+ * branch summary) that pi embeds into the editor top border. The type is
+ * intentionally structural: stock does not re-export StatusIndicator from the
+ * package root, so importing it would couple us to an internal dist path.
+ */
+export type EmbeddedStatusIndicator = {
+  renderInBorder(width: number): string;
+  renderSpinnerInBorder(width: number): string;
+};
 
 // Blank/missing levels display as "off"; unknown non-blank names are kept
 // verbatim so the status border shows whatever the session reported.
@@ -58,59 +51,11 @@ export function setEditorStatusLabel(state: {
   }
 }
 
-function stopWorkingSpinner(): void {
-  if (!spinnerTimer) return;
-
-  clearInterval(spinnerTimer);
-  spinnerTimer = undefined;
-}
-
-export function setEditorWorking(working: boolean): void {
-  const wasWorking = isWorking;
-  isWorking = working;
-
-  if (!working) {
-    spinnerIndex = 0;
-    stopWorkingSpinner();
-    activeTui?.requestRender();
-    return;
-  }
-
-  if (!wasWorking) {
-    spinnerIndex = 0;
-  }
-
-  // Nothing to animate until a rounded editor is mounted. Without this guard a
-  // subagent-triggered start could spin a timer for a session that never gets
-  // an editor of its own.
-  if (!activeTui) return;
-
-  if (!spinnerTimer) {
-    spinnerTimer = setInterval(() => {
-      spinnerIndex = (spinnerIndex + 1) % WORKING_SPINNER_FRAMES.length;
-      activeTui?.requestRender();
-    }, WORKING_SPINNER_INTERVAL_MS);
-    // The timer only drives renders, so it must never hold the process open on
-    // its own if it outlives the session that started it.
-    unrefTimer(spinnerTimer);
-  }
-
-  activeTui.requestRender();
-}
-
 export function resetEditorWorkingState(): void {
-  isWorking = false;
-  spinnerIndex = 0;
-  stopWorkingSpinner();
   activeTui = undefined;
 }
 
-function unrefTimer(timer: ReturnType<typeof setInterval>): void {
-  // SAFETY: timeouts are plain numbers under the DOM typings and Timeout
-  // objects under Node's; only the latter can be detached from the event
-  // loop, so the optional call is safe under either typing.
-  (timer as unknown as { unref?: () => void }).unref?.();
-}
+
 
 function buildBoxedContentLine(
   width: number,
@@ -160,96 +105,11 @@ function buildStatusBorderLine(
   );
 }
 
-function fitBorderLine(
-  width: number,
-  left: string,
-  right: string,
-  leftText: string,
-  rightText: string,
-  borderColor: (text: string) => string,
-  fillColor: (text: string) => string = borderColor,
-): string {
-  if (width <= 0) return "";
-  if (width === 1) return borderColor(left);
-  if (width === 2) return borderColor(`${left}${right}`);
-
-  const fixedWidth = 2;
-  let fittedLeft = leftText;
-  let fittedRight = rightText;
-
-  while (
-    fixedWidth +
-      visibleWidth(fittedLeft) +
-      visibleWidth(fittedRight) +
-      BORDER_MIN_GAP >
-      width &&
-    visibleWidth(fittedRight) > 0
-  ) {
-    fittedRight = truncateToWidth(
-      fittedRight,
-      Math.max(0, visibleWidth(fittedRight) - 1),
-      "",
-    );
-  }
-
-  while (
-    fixedWidth +
-      visibleWidth(fittedLeft) +
-      visibleWidth(fittedRight) +
-      BORDER_MIN_GAP >
-      width &&
-    visibleWidth(fittedLeft) > 0
-  ) {
-    fittedLeft = truncateToWidth(
-      fittedLeft,
-      Math.max(0, visibleWidth(fittedLeft) - 1),
-      "",
-    );
-  }
-
-  const gapWidth = Math.max(
-    0,
-    width - fixedWidth - visibleWidth(fittedLeft) - visibleWidth(fittedRight),
-  );
-
-  return (
-    borderColor(left) +
-    fittedLeft +
-    fillColor("─".repeat(gapWidth)) +
-    fittedRight +
-    borderColor(right)
-  );
-}
-
-function buildWorkingBorderLine(
-  width: number,
-  left: string,
-  right: string,
-  borderColor: (text: string) => string,
-): string {
-  const spinner = borderColor(WORKING_SPINNER_FRAMES[spinnerIndex] ?? "•");
-  const message = borderColor(WORKING_MESSAGE);
-  const leadingGap = borderColor("─");
-
-  return fitBorderLine(
-    width,
-    left,
-    right,
-    `${leadingGap} ${spinner} ${message} `,
-    "",
-    borderColor,
-  );
-}
-
 function buildRoundedScrollBorder(
   width: number,
   hiddenLineCount: number,
   borderColor: (text: string) => string,
 ): string {
-  if (width <= 0) return "";
-  if (width === 1) return borderColor("╭");
-  if (width === 2) return borderColor("╭╮");
-
   const label = ` ↑ ${hiddenLineCount} more `;
   const innerWidth = Math.max(0, width - 2);
   const fitted = truncateToWidth(label, innerWidth, "");
@@ -320,21 +180,130 @@ function getScrollOffset(editor: CustomEditor): number {
   // SAFETY: the runtime editor instance is the pi TUI Editor subclass, which
   // keeps the first hidden line index in a private `scrollOffset` field.
   // TypeScript hides that field from us, but reading it right after
-  // super.render() (which just recomputed it) is safe and matches the hidden
-  // count the base editor used for its own top border.
+  // super.render() (which just recomputed it) is safe and is the only way to
+  // rebuild the top border at the frame width instead of the inner width.
   const offset = (editor as unknown as { scrollOffset?: number }).scrollOffset;
 
   return typeof offset === "number" ? offset : 0;
 }
 
 export class RoundedEditor extends CustomEditor {
+  // Named to avoid clashing with CustomEditor's own private
+  // `workingStatusIndicator` (which its setWorkingStatusIndicator writes and
+  // its renderTopBorder reads — neither is used here since both are
+  // overridden).
+  private embeddedStatusIndicator: EmbeddedStatusIndicator | undefined;
+
   constructor(
     tui: TUI,
     theme: EditorTheme,
     keybindings: KeybindingsManager,
   ) {
-    super(tui, theme, keybindings);
+    // embedWorkingStatus makes stock InteractiveMode route its working,
+    // compaction, retry, and branch-summary indicators to this editor via
+    // setWorkingStatusIndicator instead of a separate status line below.
+    super(tui, theme, keybindings, { embedWorkingStatus: true });
     activeTui = tui;
+  }
+
+  override setWorkingStatusIndicator(
+    indicator: EmbeddedStatusIndicator | undefined,
+  ): void {
+    this.embeddedStatusIndicator = indicator;
+    activeTui?.requestRender();
+  }
+
+  // Rounded port of the stock CustomEditor top border: the active status
+  // indicator (if any) is embedded into the border, with the scroll overflow
+  // label sharing the line when it fits and collapsing to a spinner when it
+  // does not. Width accounting mirrors stock, with two extra cells reserved
+  // for the ╭/╮ corners.
+  protected override renderTopBorder(
+    width: number,
+    hiddenLineCount: number,
+  ): string {
+    const borderColor = (text: string) => this.borderColor(text);
+    if (width <= 0) return "";
+    if (width === 1) return borderColor("╭");
+    if (width === 2) return borderColor("╭╮");
+
+    const indicator = this.embeddedStatusIndicator;
+    if (!indicator) {
+      return hiddenLineCount > 0
+        ? buildRoundedScrollBorder(width, hiddenLineCount, borderColor)
+        : borderColor(`╭${"─".repeat(width - 2)}╮`);
+    }
+
+    const reserve = 6;
+    let status = indicator.renderInBorder(Math.max(1, width - reserve));
+    let statusWidth = visibleWidth(status);
+    if (statusWidth === 0) {
+      return hiddenLineCount > 0
+        ? buildRoundedScrollBorder(width, hiddenLineCount, borderColor)
+        : borderColor(`╭${"─".repeat(width - 2)}╮`);
+    }
+
+    const overflowLabel =
+      hiddenLineCount > 0 ? ` ↑ ${hiddenLineCount} more ` : undefined;
+    const overflowLabelWidth = overflowLabel
+      ? visibleWidth(overflowLabel)
+      : 0;
+    const overflowStart = Math.floor((width - overflowLabelWidth) / 2);
+    const canFitOverflow = (): boolean =>
+      overflowLabel !== undefined &&
+      overflowLabelWidth + 2 <= width &&
+      overflowStart - statusWidth - 5 >= 1 &&
+      overflowStart + overflowLabelWidth <= width - 1;
+
+    if (overflowLabel && !canFitOverflow()) {
+      status = indicator.renderSpinnerInBorder(width);
+      statusWidth = visibleWidth(status);
+    }
+
+    if (canFitOverflow()) {
+      const fillBefore = overflowStart - statusWidth - 5;
+      const fillAfter = width - 1 - overflowStart - overflowLabelWidth;
+      return (
+        borderColor("╭── ") +
+        status +
+        borderColor(
+          ` ${
+            "─".repeat(fillBefore)
+          }${overflowLabel}${"─".repeat(fillAfter)}`,
+        ) +
+        borderColor("╮")
+      );
+    }
+
+    if (width >= statusWidth + reserve) {
+      const fill = width - statusWidth - reserve;
+      return (
+        borderColor("╭── ") +
+        status +
+        borderColor(` ${"─".repeat(fill)}`) +
+        borderColor("╮")
+      );
+    }
+
+    status = indicator.renderSpinnerInBorder(width);
+    statusWidth = visibleWidth(status);
+    if (statusWidth === 0) {
+      return borderColor(`╭${"─".repeat(width - 2)}╮`);
+    }
+    if (statusWidth > width - 2) {
+      const fitted = truncateToWidth(status, Math.max(0, width - 2));
+      const pad = " ".repeat(
+        Math.max(0, width - 2 - visibleWidth(fitted)),
+      );
+      return borderColor("╭") + fitted + pad + borderColor("╮");
+    }
+    const prefixWidth = Math.min(2, Math.max(0, width - 2 - statusWidth));
+    const restWidth = Math.max(0, width - 2 - prefixWidth - statusWidth);
+    return (
+      borderColor(`╭${"─".repeat(prefixWidth)}`) +
+      status +
+      borderColor(`${"─".repeat(restWidth)}╮`)
+    );
   }
 
   render(width: number): string[] {
@@ -350,18 +319,11 @@ export class RoundedEditor extends CustomEditor {
     );
     const extra = lines.slice(bottomBorderIndex + 1);
     const hasAutocomplete = autocompleteLineCount > 0;
-    const topBorderLine = lines[0] ?? "";
-    // A scrolled editor centers its overflow label at the frame width instead
-    // of re-wrapping the base border text rendered at the inner width.
-    const hiddenLineCount = getScrollOffset(this);
-    let topBorder = hiddenLineCount > 0
-      ? buildRoundedScrollBorder(width, hiddenLineCount, borderColor)
-      : buildBorderFromBaseLine(width, "╭", "╮", topBorderLine, borderColor);
+    // The embedded indicator and the scroll label are rebuilt at the full
+    // frame width from the fresh scroll offset; lines[0] (rendered by
+    // super.render at the inner width) is intentionally discarded.
+    const topBorder = this.renderTopBorder(width, getScrollOffset(this));
     const bottomBorderLine = lines[bottomBorderIndex] ?? "";
-
-    if (isWorking && !hasBorderMetadata(topBorderLine)) {
-      topBorder = buildWorkingBorderLine(width, "╭", "╮", borderColor);
-    }
 
     const content = lines
       .slice(1, bottomBorderIndex)

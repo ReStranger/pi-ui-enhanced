@@ -10,9 +10,9 @@ import {
 } from "@earendil-works/pi-tui";
 import {
   RoundedEditor,
+  type EmbeddedStatusIndicator,
   resetEditorWorkingState,
   setEditorStatusLabel,
-  setEditorWorking,
 } from "../src/index.ts";
 
 /** Private base-Editor fields the frame math relies on. */
@@ -49,6 +49,14 @@ function makeEditor() {
     editor,
     internals: editor as unknown as EditorInternals,
     renderRequests,
+  };
+}
+
+/** Minimal stand-in for the stock StatusIndicator. */
+function makeIndicator(text: string): EmbeddedStatusIndicator {
+  return {
+    renderInBorder: () => text,
+    renderSpinnerInBorder: () => "⠦",
   };
 }
 
@@ -147,32 +155,76 @@ test("the status border carries the model and the thinking level", () => {
   assert.equal(visibleWidth(bottom), 60);
 });
 
-test("the working spinner replaces the top border while the agent runs", () => {
+test("a stock working indicator is embedded into the top border", () => {
   const { editor } = makeEditor();
   editor.setText("hi");
-  setEditorWorking(true);
+  editor.setWorkingStatusIndicator(makeIndicator("⠦ Working"));
 
-  try {
-    assert.match(editor.render(40)[0] ?? "", /Working/);
-  } finally {
-    setEditorWorking(false);
-  }
+  const top = editor.render(40)[0] ?? "";
+  assert.match(top, /Working/);
+  assert.ok(top.startsWith("╭"), `unexpected top border: ${top}`);
+  assert.ok(top.endsWith("╮"), `unexpected top border: ${top}`);
+  assert.equal(visibleWidth(top), 40);
+
+  editor.setWorkingStatusIndicator(undefined);
+  const cleared = editor.render(40)[0] ?? "";
+  assert.doesNotMatch(cleared, /Working/);
+  assert.equal(visibleWidth(cleared), 40);
 });
 
-test("the working spinner does not clobber a scroll indicator", () => {
+test("a stock compaction indicator is embedded into the top border", () => {
+  const { editor } = makeEditor();
+  editor.setText("hi");
+  editor.setWorkingStatusIndicator(
+    makeIndicator("⠦ Compacting context... (escape to cancel)"),
+  );
+
+  const top = editor.render(60)[0] ?? "";
+  assert.match(top, /Compacting/);
+  assert.ok(top.startsWith("╭"), `unexpected top border: ${top}`);
+  assert.ok(top.endsWith("╮"), `unexpected top border: ${top}`);
+  assert.equal(visibleWidth(top), 60);
+});
+
+test("an embedded indicator does not clobber a scroll indicator", () => {
   const { editor } = makeEditor();
   editor.setText(
     Array.from({ length: 40 }, (_, index) => `line ${index}`).join("\n"),
   );
-  setEditorWorking(true);
+  editor.setWorkingStatusIndicator(makeIndicator("⠦ Working"));
 
-  try {
-    const top = editor.render(40)[0] ?? "";
-    assert.match(top, /↑/);
-    assert.doesNotMatch(top, /Working/);
-  } finally {
-    setEditorWorking(false);
+  const top = editor.render(40)[0] ?? "";
+  assert.match(top, /↑/);
+  assert.doesNotMatch(top, /Working/);
+  assert.equal(visibleWidth(top), 40);
+});
+
+test("embedded indicators keep every frame line at the requested width", () => {
+  const { editor } = makeEditor();
+  editor.setText("hi");
+  editor.setWorkingStatusIndicator(makeIndicator("⠦ Working"));
+
+  for (const width of [8, 20, 40, 120]) {
+    for (const line of editor.render(width)) {
+      assert.equal(
+        visibleWidth(line),
+        width,
+        `width=${width} line=${JSON.stringify(line)}`,
+      );
+    }
   }
+});
+
+test("setting the indicator requests a render", () => {
+  const { editor, renderRequests } = makeEditor();
+  editor.render(30);
+  renderRequests.length = 0;
+
+  editor.setWorkingStatusIndicator(makeIndicator("⠦ Working"));
+  assert.equal(renderRequests.length, 1);
+
+  editor.setWorkingStatusIndicator(undefined);
+  assert.equal(renderRequests.length, 2);
 });
 
 test("autocomplete rows stay where base handleMouse hit-tests them", () => {
@@ -240,39 +292,4 @@ test("clicks on autocomplete rows are mapped back onto the frame content", () =>
   assert.deepEqual(result, { handled: true, focus: true });
 });
 
-test("no spinner timer is scheduled without a mounted editor", (context) => {
-  resetEditorWorkingState();
-  const setIntervalMock = context.mock.method(globalThis, "setInterval");
 
-  setEditorWorking(true);
-
-  assert.equal(
-    setIntervalMock.mock.callCount(),
-    0,
-    "an editor must be mounted before the spinner starts ticking",
-  );
-
-  setEditorWorking(false);
-});
-
-test("the spinner ticks renders and stops on demand", (context) => {
-  context.mock.timers.enable({ apis: ["setInterval"] });
-  const { editor, renderRequests } = makeEditor();
-  editor.render(30);
-  renderRequests.length = 0;
-
-  setEditorWorking(true);
-  context.mock.timers.tick(80);
-  assert.ok(renderRequests.length >= 1, "each tick must request a render");
-
-  const afterTicks = renderRequests.length;
-  setEditorWorking(false);
-  context.mock.timers.tick(1_000);
-  assert.equal(
-    renderRequests.length,
-    afterTicks + 1,
-    "only the render from stopping is left",
-  );
-
-  context.mock.timers.reset();
-});
