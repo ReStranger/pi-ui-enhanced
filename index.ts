@@ -6,10 +6,18 @@ import {
 	setEditorStatusLabel,
 	setEditorWorking,
 } from "./src/index.ts";
-import type { ExtensionAPI } from "./src/index.ts";
+import type { ExtensionAPI, ExtensionContext } from "./src/index.ts";
+
+// Subagent children load these extensions too and, through the per-cwd module
+// registry, share this module instance — so their events would write the same
+// editor state mirror. They are headless (mode "print", no UI context).
+function rendersEditorUi(ctx: Pick<ExtensionContext, "mode" | "hasUI">): boolean {
+	return ctx.mode === "tui" && ctx.hasUI === true;
+}
 
 export default function roundedInputExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
+		if (!rendersEditorUi(ctx)) return;
 		resetEditorWorkingState();
 		setEditorStatusLabel({
 			modelId: ctx.model?.id,
@@ -29,26 +37,35 @@ export default function roundedInputExtension(pi: ExtensionAPI): void {
 		});
 	});
 
-	pi.on("agent_start", () => {
+	pi.on("agent_start", (_event, ctx) => {
+		if (!rendersEditorUi(ctx)) return;
 		setEditorWorking(true);
 	});
 
-	pi.on("agent_settled", () => {
+	pi.on("agent_settled", (_event, ctx) => {
+		if (!rendersEditorUi(ctx)) return;
 		setEditorWorking(false);
+		setEditorStatusLabel({
+			modelId: ctx.model?.id,
+			thinkingLevel: ctx.thinkingLevel,
+		});
 	});
 
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", (_event, ctx) => {
+		if (!rendersEditorUi(ctx)) return;
 		resetEditorWorkingState();
 	});
 
 	pi.on("model_select", (event, ctx) => {
+		if (!rendersEditorUi(ctx)) return;
 		setEditorStatusLabel({
-			modelId: event.model?.id,
+			modelId: event.model.id,
 			thinkingLevel: ctx.thinkingLevel,
 		});
 	});
 
 	pi.on("thinking_level_select", (event, ctx) => {
+		if (!rendersEditorUi(ctx)) return;
 		setEditorStatusLabel({
 			modelId: ctx.model?.id,
 			thinkingLevel: event.level,

@@ -1,4 +1,7 @@
-export type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+export type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 import {
   CustomEditor,
