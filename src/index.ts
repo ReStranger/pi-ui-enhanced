@@ -3,6 +3,10 @@ export type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
+export * from "./status-wrap.ts";
+export * from "./mcp-status.ts";
+export * from "./lsp-status.ts";
+
 import {
   CustomEditor,
   type KeybindingsManager,
