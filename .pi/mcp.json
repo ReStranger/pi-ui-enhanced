@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "mcp-nixos": {
+      "url": "http://localhost:3229/mcp"
+    }
+  }
+}
