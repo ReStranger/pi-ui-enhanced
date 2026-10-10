@@ -122,11 +122,20 @@ export function dim(text: string): string {
  * Whether this context renders the interactive editor UI. Subagent children
  * load these extensions too, but run headless (print mode, no UI), so every
  * UI write is gated on this.
+ *
+ * Total by construction: a context invalidated by a session replacement or
+ * reload throws from every getter (`assertActive`), and this is the one place
+ * that reads them, so it must not propagate — a status refresh may lose its
+ * race with the teardown and there is no UI left to write to anyway.
  */
 export function rendersEditorUi(
   ctx: Pick<ExtensionContext, "mode" | "hasUI">,
 ): boolean {
-  return ctx.mode === "tui" && ctx.hasUI === true;
+  try {
+    return ctx.mode === "tui" && ctx.hasUI === true;
+  } catch {
+    return false;
+  }
 }
 
 /** Stock sanitize: single-line statuses only (ANSI is preserved). */

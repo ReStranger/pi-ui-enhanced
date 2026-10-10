@@ -287,7 +287,14 @@ function scheduleSettle(pi: ExtensionAPI, ctx: ExtensionContext): void {
   for (const delay of MCP_SETTLE_DELAYS_MS) {
     const timer = setTimeout(() => {
       settleTimers = settleTimers.filter((pending) => pending !== timer);
-      refreshCounts(pi, ctx);
+      try {
+        refreshCounts(pi, ctx);
+      } catch {
+        // `ctx` is captured from the event handler, so this can fire after the
+        // session was replaced and the context invalidated. A timer callback
+        // has no caller to handle that: it would surface as an uncaught
+        // exception and take pi down with it.
+      }
     }, delay);
     // A status refresh must never hold the process open.
     (timer as { unref?: () => void }).unref?.();
@@ -324,6 +331,18 @@ export function subscribeMcpServers(pi: ExtensionAPI): () => void {
     offs.push(pi.on("agent_settled", settled));
   } catch {
     // Older pi without the event — the settle schedule still covers startup.
+  }
+  try {
+    offs.push(
+      pi.on("session_shutdown", () => {
+        // Emitted on the *outgoing* runner before it is invalidated, so this
+        // instance is still the right one to drop its pending ticks. Anything
+        // left over would run against a context that has already gone stale.
+        clearMcpSettleTimers();
+      }),
+    );
+  } catch {
+    // Older pi without the event — the schedule is short and bounded anyway.
   }
   return () => {
     for (const off of offs) {

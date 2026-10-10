@@ -10,6 +10,7 @@ import {
 } from "../src/status-wrap.ts";
 import {
   clearMcpCounts,
+  clearMcpSettleTimers,
   currentMcpCounts,
   deriveMcpCounts,
   formatMcpShort,
@@ -74,19 +75,38 @@ function makeFakePi(options?: {
 }
 
 /** Fake ExtensionContext with a recording ui.setStatus. */
-function makeFakeCtx(options?: { hasUI?: boolean }): { ctx: any; calls: Array<[string, string | undefined]> } {
+function makeFakeCtx(options?: { hasUI?: boolean }): {
+  ctx: any;
+  calls: Array<[string, string | undefined]>;
+  invalidate(): void;
+} {
   const calls: Array<[string, string | undefined]> = [];
+  let stale = false;
+  // Mirror pi's real context: every getter runs `assertActive()`, so an
+  // invalidated context throws on read instead of reporting anything.
+  const assertActive = (): void => {
+    if (stale) throw new Error("This extension ctx is stale after session replacement or reload.");
+  };
   const ctx = {
-    cwd: "/x",
-    mode: "tui",
-    hasUI: options?.hasUI ?? true,
+    get cwd() {
+      assertActive();
+      return "/x";
+    },
+    get mode() {
+      assertActive();
+      return "tui";
+    },
+    get hasUI() {
+      assertActive();
+      return options?.hasUI ?? true;
+    },
     ui: {
       setStatus: (key: string, text: string | undefined) => {
         calls.push([key, text]);
       },
     },
   };
-  return { ctx, calls };
+  return { ctx, calls, invalidate: () => { stale = true; } };
 }
 
 test("MCP icon is single-cell", () => {
@@ -424,6 +444,56 @@ test("the settle schedule picks up servers that connect after session_start", (t
   }
 });
 
+test("session_shutdown drops the pending settle ticks", (t) => {
+  clearMcpCounts();
+  let tools: unknown[] = [];
+  const fake = makeFakePi({ servers: [], tools: () => tools });
+  const { ctx, calls } = makeFakeCtx();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const off = subscribeMcpServers(fake.pi as any);
+  try {
+    fake.emit("session_start", ctx);
+    // Core is about to connect the servers, but the session is torn down
+    // first: the ticks must not survive into the next one.
+    fake.emit("session_shutdown", ctx);
+    tools = [{ name: "mcp__mcp-nixos__nix", namespace: { name: "mcp__mcp-nixos" } }];
+    t.mock.timers.tick((MCP_SETTLE_DELAYS_MS.at(-1) ?? 0) + 1);
+    assert.deepEqual(calls, []);
+  } finally {
+    off();
+    clearMcpCounts();
+    clearMcpSettleTimers();
+    t.mock.timers.reset();
+  }
+});
+
+test("the settle schedule survives a context invalidated mid-flight", (t) => {
+  clearMcpCounts();
+  let tools: unknown[] = [];
+  const fake = makeFakePi({ servers: [], tools: () => tools });
+  const { ctx, calls, invalidate } = makeFakeCtx();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const off = subscribeMcpServers(fake.pi as any);
+  try {
+    fake.emit("session_start", ctx);
+    tools = [{ name: "mcp__mcp-nixos__nix", namespace: { name: "mcp__mcp-nixos" } }];
+    // The session is replaced/reloaded between scheduling and the first tick:
+    // the context now throws from every getter.
+    invalidate();
+    assert.doesNotThrow(() => {
+      t.mock.timers.tick((MCP_SETTLE_DELAYS_MS.at(-1) ?? 0) + 1);
+    });
+    assert.deepEqual(calls, []);
+    // Counts are still tracked — only the UI write is dropped.
+    assert.deepEqual(currentMcpCounts(), { enabled: 1, disabled: 0 });
+  } finally {
+    off();
+    clearMcpCounts();
+    clearMcpSettleTimers();
+    t.mock.timers.reset();
+  }
+});
+
 test("agent_settled refreshes the count for servers that connect silently", () => {
   clearMcpCounts();
   let tools: unknown[] = [];
@@ -471,6 +541,7 @@ test("subscribeMcpServers unsubscribe removes handlers and drops counts", () => 
   assert.equal(fake.handlerFor("session_start"), undefined);
   assert.equal(fake.handlerFor("mcp_servers_change"), undefined);
   assert.equal(fake.handlerFor("agent_settled"), undefined);
+  assert.equal(fake.handlerFor("session_shutdown"), undefined);
   assert.equal(currentMcpCounts(), undefined);
   // Emission after unsubscribe is a no-op.
   assert.doesNotThrow(() => fake.emit("session_start", ctx));
