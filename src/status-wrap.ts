@@ -1,7 +1,7 @@
-import { tmpdir } from "node:os";
-import { appendFileSync } from "node:fs";
-import { basename, join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { homedir, tmpdir } from "node:os";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { execFile } from "node:child_process";
 import {
   truncateToWidth,
   visibleWidth,
@@ -15,22 +15,11 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 /**
- * Plugin-status wrapper scaffold.
+ * Custom footer component for pi-coding-agent.
  *
- * Other pi extensions publish one-line statuses via `ctx.ui.setStatus(key,
- * text)`. Stock pi renders them verbatim in the footer. This module lets us
- * rewrite any key at render time:
- *
- *   registerStatusRewrite("mcp", rewriteMcpStatus);
- *
- * Render-time rewriting (inside our own footer component) has no race with
- * the owning plugin — unlike overwriting the key via `setStatus`, which the
- * owner would clobber on its next `updateStatusBar()`.
- *
- * NOTE: `setFooter()` replaces the stock footer wholesale, so this component
- * re-renders the stock lines (pwd, token stats, statuses) from the public
- * extension API. Ported from the stock `FooterComponent` (pi-coding-agent
- * 0.87.x); only the statuses line is modified by rewrites.
+ * It renders working directory, git branch, token statistics, and extension
+ * status lines. Extensions register status line transforms with
+ * `registerStatusRewrite(key, rewrite)`.
  */
 
 /** Helpers passed to every rewrite. `theme` is undefined in unit tests. */
@@ -39,11 +28,8 @@ export interface RewriteHelpers {
 }
 
 /**
- * Rewrite one status line. Return `undefined` to hide it.
- *
- * Rewrites receive the footer theme so they can colorize via
- * `helpers.theme.fg(...)` (theme colors, not hardcoded ANSI). The MCP rewrite
- * paints itself `accent`; the LSP rewrite paints itself `thinkingLow`.
+ * Transforms a status line string, or returns `undefined` to hide it.
+ * Colors come from `helpers.theme.fg(...)`.
  */
 export type StatusRewrite = (
   raw: string | undefined,
@@ -100,20 +86,14 @@ export function applyStatusRewrite(
 }
 
 /**
- * ANSI strikethrough (SGR 9 … SGR 29). `stripTerminalSequences`/`visibleWidth`
- * ignore it, so footer width math is unaffected. Terminals without
- * strikethrough support render plain text — pair with `dim` for fallback.
+ * Formats text with ANSI strikethrough (SGR 9 to SGR 29).
+ * Stripping terminal sequences leaves width calculations unaffected.
  */
 export function strike(text: string): string {
   return `\x1b[9m${text}\x1b[29m`;
 }
 
-/**
- * ANSI dim (SGR 2 … SGR 22). Hardcoded rather than themed: use it for
- * theme-independent effects (e.g. struck-through suffixes); for themed
- * coloring use `helpers.theme.fg(...)` inside a rewrite. Pairs with `strike` for terminals that
- * cannot render strikethrough.
- */
+/** Formats text with ANSI dim (SGR 2 to SGR 22). */
 export function dim(text: string): string {
   return `\x1b[2m${text}\x1b[22m`;
 }
@@ -137,8 +117,7 @@ export function rendersEditorUi(
     return false;
   }
 }
-
-/** Stock sanitize: single-line statuses only (ANSI is preserved). */
+/** Stock sanitize that keeps statuses on one line and preserves ANSI. */
 export function sanitizeStatusText(text: string): string {
   return text
     .replace(/[\r\n\t]/g, " ")
@@ -155,31 +134,33 @@ export function formatTokens(count: number): string {
   return `${Math.round(count / 1000000)}M`;
 }
 
-/**
- * Nerd Font folder icon (fa-folder, U+F07B — one cell in NF builds).
- * Written as an escape: literal PUA glyphs do not survive chat transport.
- */
+/** Nerd Font folder icon (fa-folder, U+F07B). */
 export const FOLDER_ICON = "\uF07B";
 
-/**
- * Folder icon + name color: the visually-blue slot (`thinkingLow` →
- * stylix `cyan` #7aaaff; stock dark #5f87af; stock light `blue`).
- */
+/** Color slot for folder icon and path. */
 export const FOLDER_COLOR: ThemeColor = "thinkingLow";
 
-/**
- * Nerd Font fork icon (fa-code-fork, U+F126 — one cell in NF builds).
- */
+/** Nerd Font fork icon (fa-code-fork, U+F126, one cell in NF builds). */
 export const BRANCH_ICON = "\uF126";
 
 /**
- * Diff icon after the branch (user-supplied codepoint U+F07C).
- * One cell in NF builds; written as an escape for transport safety.
+ * Diff icon after the branch (user-supplied codepoint U+F07C, one cell in NF
+ * builds). Written as an escape for transport safety.
  */
 export const DIFF_ICON = "\uF07C";
 
-/** How long a git result is reused (footer renders often). */
-export const GIT_DIRTY_TTL_MS = 2000;
+/**
+ * How long a git result is reused. The footer renders far more often than git
+ * state changes, so without a TTL every render would spawn git.
+ */
+export const GIT_DIRTY_TTL_MS = 5000;
+
+/**
+ * How long a failed git spawn (not a repository, no git binary) is reused
+ * before another attempt. Without this backoff a non-git cwd would spawn a
+ * doomed `git` process on every TTL expiry, forever.
+ */
+export const GIT_MISS_TTL_MS = GIT_DIRTY_TTL_MS * 10;
 
 /** Per-cwd worktree numbers: `main* \uF07C +19 ~48 -2`. */
 export interface WorktreeStats {
@@ -199,17 +180,56 @@ const CLEAN_STATS: WorktreeStats = {
   untracked: 0,
 };
 
-const gitStatsCache = new Map<
-  string,
-  { stats: WorktreeStats; at: number }
->();
+export interface GitStatusCacheEntry {
+  branch?: string;
+  stats: WorktreeStats;
+  /** Epoch ms of the last successful git read for this cwd. */
+  lastCheck: number;
+  /**
+   * True when the last git read failed (not a repo, no binary). A missed entry
+   * is re-checked every `GIT_MISS_TTL_MS` instead of `GIT_DIRTY_TTL_MS`.
+   */
+  missed?: boolean;
+}
+
+const gitStatsCache = new Map<string, GitStatusCacheEntry>();
+const refreshingCwds = new Set<string>();
+
+let gitRenderCallback: (() => void) | undefined;
+let activeContext: ExtensionContext | undefined;
+
+export function setGitRenderCallback(
+  callback: (() => void) | undefined,
+): void {
+  gitRenderCallback = callback;
+}
+
+function notifyGitChanged(): void {
+  // `gitRenderCallback` is `tui.requestRender` (with a `ctx.ui` fallback wired
+  // by `installWrappedFooter`), so one call covers both render paths.
+  try {
+    gitRenderCallback?.();
+  } catch {
+    try {
+      (activeContext?.ui as { requestRender?: () => void })?.requestRender?.();
+    } catch {
+      // Context requestRender must not throw
+    }
+  }
+}
+
+/** Check if background git check is in progress. */
+export function isGitRefreshing(cwd?: string): boolean {
+  return cwd ? refreshingCwds.has(cwd) : refreshingCwds.size > 0;
+}
 
 /** Test helper: drop cached git results. */
 export function clearGitDirtyCache(): void {
   gitStatsCache.clear();
+  refreshingCwds.clear();
 }
 
-/** Pure: any `git status --porcelain` output means uncommitted changes. */
+/** Pure: any output from `git status --porcelain` means uncommitted changes. */
 export function porcelainIsDirty(output: string): boolean {
   return output.trim().length > 0;
 }
@@ -223,7 +243,32 @@ export function countUntracked(porcelain: string): number {
   return count;
 }
 
-/** Pure: sum added/deleted lines from `git diff --numstat` (`- -` = binary). */
+/** Pure: parse branch name from porcelain v1 branch line (`## <branch>...<upstream>`). */
+export function parsePorcelainBranch(line: string): string | undefined {
+  if (!line.startsWith("## ")) return undefined;
+  const content = line.slice(3).trim();
+  if (!content) return undefined;
+  if (
+    content.startsWith("HEAD (no branch)") ||
+    content.startsWith("(detached")
+  ) {
+    return "HEAD";
+  }
+  if (content.startsWith("No commits yet on ")) {
+    return content.slice("No commits yet on ".length).trim();
+  }
+  if (content.startsWith("Initial commit on ")) {
+    return content.slice("Initial commit on ".length).trim();
+  }
+  const dotIndex = content.indexOf("...");
+  if (dotIndex >= 0) {
+    return content.slice(0, dotIndex).trim();
+  }
+  const spaceIndex = content.indexOf(" ");
+  return spaceIndex >= 0 ? content.slice(0, spaceIndex).trim() : content;
+}
+
+/** Pure: sum added/deleted lines from `git diff --numstat` (`- -` means binary). */
 export function parseNumstat(output: string): {
   added: number;
   deleted: number;
@@ -240,42 +285,201 @@ export function parseNumstat(output: string): {
   return { added, deleted };
 }
 
-/** Git output readers; injectable for tests. */
+/** Git output readers; injectable for synchronous unit tests. */
 export interface GitReaders {
   porcelain: (cwd: string) => string | undefined;
   numstat: (cwd: string) => string | undefined;
 }
 
-function readGit(cwd: string, args: string[]): string | undefined {
-  try {
-    const out = execFileSync("git", ["-C", cwd, ...args], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 3000,
-    });
-    return typeof out === "string" ? out : undefined;
-  } catch {
-    // Not a repo, no git binary, timeout — treat as clean, never throw.
-    return undefined;
+export type AsyncGitRunner = (
+  cwd: string,
+  args: string[],
+) => Promise<string | undefined>;
+
+let customGitRunner: AsyncGitRunner | undefined;
+
+/** Test helper: set custom async git runner. */
+export function setCustomGitRunner(runner: AsyncGitRunner | undefined): void {
+  customGitRunner = runner;
+}
+
+function execGitAsync(
+  cwd: string,
+  args: string[],
+  timeoutMs: number = 3000,
+): Promise<string | undefined> {
+  if (customGitRunner) {
+    return customGitRunner(cwd, args);
   }
-}
-
-function readPorcelain(cwd: string): string | undefined {
-  return readGit(cwd, [
-    "status",
-    "--porcelain=v1",
-    "--untracked-files=normal",
-  ]);
-}
-
-function readNumstat(cwd: string): string | undefined {
-  return readGit(cwd, ["diff", "HEAD", "--numstat"]);
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        "git",
+        ["-C", cwd, ...args],
+        {
+          encoding: "utf8",
+          timeout: timeoutMs,
+          maxBuffer: 2 * 1024 * 1024,
+        },
+        (error, stdout) => {
+          if (error) {
+            resolve(undefined);
+          } else {
+            resolve(typeof stdout === "string" ? stdout : undefined);
+          }
+        },
+      );
+    } catch {
+      resolve(undefined);
+    }
+  });
 }
 
 /**
- * Worktree numbers for `cwd`, cached per cwd for GIT_DIRTY_TTL_MS — the
- * footer renders far more often than git state changes. Non-string cwd /
- * git failure → zeros. `readers` is injectable for tests.
+ * Trigger an asynchronous background git status refresh for `cwd`.
+ * Guarded against concurrent runs for the same cwd.
+ */
+export function triggerGitRefresh(cwd: unknown): Promise<void> {
+  if (typeof cwd !== "string" || cwd.length === 0) return Promise.resolve();
+  if (refreshingCwds.has(cwd)) return Promise.resolve();
+  refreshingCwds.add(cwd);
+
+  return (async () => {
+    try {
+      const rawStatus = await execGitAsync(cwd, [
+        "status",
+        "--porcelain=v1",
+        "-b",
+        "--untracked-files=normal",
+      ]);
+      const now = Date.now();
+      if (rawStatus === undefined) {
+        // A failed spawn means this cwd is not a worktree (or git is missing).
+        // Cache it as a miss so the backoff suppresses the next doomed spawn.
+        const previous = gitStatsCache.get(cwd);
+        const changed =
+          previous !== undefined &&
+          (previous.branch !== undefined || previous.stats.dirty);
+        gitStatsCache.set(cwd, {
+          stats: { ...CLEAN_STATS },
+          branch: undefined,
+          lastCheck: now,
+          missed: true,
+        });
+        if (changed) {
+          notifyGitChanged();
+        }
+        return;
+      }
+
+      const lines = rawStatus.split("\n");
+      const firstLine = lines[0] ?? "";
+      const branch = parsePorcelainBranch(firstLine);
+      const porcelainBody = lines.slice(1).join("\n");
+      const isDirty = porcelainIsDirty(porcelainBody);
+      const untracked = countUntracked(porcelainBody);
+
+      let added = 0;
+      let deleted = 0;
+      if (isDirty) {
+        const numstatOut = await execGitAsync(cwd, [
+          "diff",
+          "HEAD",
+          "--numstat",
+        ]);
+        if (numstatOut !== undefined) {
+          const parsed = parseNumstat(numstatOut);
+          added = parsed.added;
+          deleted = parsed.deleted;
+        }
+      }
+
+      const newStats: WorktreeStats = {
+        dirty: isDirty,
+        added,
+        deleted,
+        untracked,
+      };
+
+      const previous = gitStatsCache.get(cwd);
+      const changed =
+        !previous ||
+        previous.branch !== branch ||
+        previous.stats.dirty !== newStats.dirty ||
+        previous.stats.added !== newStats.added ||
+        previous.stats.deleted !== newStats.deleted ||
+        previous.stats.untracked !== newStats.untracked;
+
+      gitStatsCache.set(cwd, {
+        branch,
+        stats: newStats,
+        lastCheck: now,
+      });
+
+      if (changed) {
+        notifyGitChanged();
+      }
+    } catch {
+      // Background git check must never throw or break caller
+    } finally {
+      refreshingCwds.delete(cwd);
+    }
+  })();
+}
+
+/**
+ * Pure staleness test for a cache entry: a failed git read (not a repository,
+ * missing binary) re-checks on the longer miss backoff, a good result on the
+ * regular TTL. No side effects, so render-path callers can call it freely.
+ */
+export function isGitStaleAt(
+  cached: GitStatusCacheEntry,
+  cwdChanged: boolean,
+  now: number,
+): boolean {
+  const ttl = cached.missed ? GIT_MISS_TTL_MS : GIT_DIRTY_TTL_MS;
+  return cwdChanged || now - cached.lastCheck >= ttl;
+}
+
+/**
+ * Return cached git status info immediately without blocking.
+ * Triggers a background refresh if the cache is stale (GIT_DIRTY_TTL_MS, or
+ * GIT_MISS_TTL_MS after a failed git spawn) or the cwd changed.
+ */
+export function getCachedGitInfo(
+  cwd: unknown,
+  now: number = Date.now(),
+): GitStatusCacheEntry {
+  if (typeof cwd !== "string" || cwd.length === 0) {
+    return {
+      stats: { ...CLEAN_STATS },
+      branch: undefined,
+      lastCheck: 0,
+    };
+  }
+  const cached = gitStatsCache.get(cwd);
+  if (!cached || isGitStaleAt(cached, false, now)) {
+    void triggerGitRefresh(cwd);
+  }
+  return cached ?? { stats: { ...CLEAN_STATS }, branch: undefined, lastCheck: 0 };
+}
+
+/**
+ * Return cached branch name immediately, or empty string if not yet loaded.
+ * Triggers background refresh asynchronously if needed.
+ */
+export function getCachedGitBranch(
+  cwd: unknown,
+  now: number = Date.now(),
+): string {
+  return getCachedGitInfo(cwd, now).branch ?? "";
+}
+
+/**
+ * Worktree numbers for `cwd`, cached per cwd for GIT_DIRTY_TTL_MS because the
+ * footer renders far more often than git state changes. Never blocks the render
+ * loop with synchronous git execution; background refresh runs asynchronously.
+ * `readers` is injectable for synchronous unit tests.
  */
 export function getWorktreeStats(
   cwd: unknown,
@@ -283,30 +487,40 @@ export function getWorktreeStats(
   readers?: GitReaders,
 ): WorktreeStats {
   if (typeof cwd !== "string" || cwd.length === 0) return { ...CLEAN_STATS };
-  const cached = gitStatsCache.get(cwd);
-  if (cached && now - cached.at < GIT_DIRTY_TTL_MS) return cached.stats;
-  let stats: WorktreeStats = { ...CLEAN_STATS };
-  try {
-    const porcelain = (readers?.porcelain ?? readPorcelain)(cwd);
-    if (porcelain !== undefined) {
-      stats = {
-        dirty: porcelainIsDirty(porcelain),
-        added: 0,
-        deleted: 0,
-        untracked: countUntracked(porcelain),
-      };
-      const numstat = (readers?.numstat ?? readNumstat)(cwd);
-      if (numstat !== undefined) {
-        const { added, deleted } = parseNumstat(numstat);
-        stats.added = added;
-        stats.deleted = deleted;
-      }
+  if (readers) {
+    const cached = gitStatsCache.get(cwd);
+    if (cached && now - cached.lastCheck < GIT_DIRTY_TTL_MS) {
+      return cached.stats;
     }
-  } catch {
-    stats = { ...CLEAN_STATS };
+    let stats: WorktreeStats = { ...CLEAN_STATS };
+    try {
+      const porcelain = readers.porcelain(cwd);
+      if (porcelain !== undefined) {
+        stats = {
+          dirty: porcelainIsDirty(porcelain),
+          added: 0,
+          deleted: 0,
+          untracked: countUntracked(porcelain),
+        };
+        const numstat = readers.numstat(cwd);
+        if (numstat !== undefined) {
+          const { added, deleted } = parseNumstat(numstat);
+          stats.added = added;
+          stats.deleted = deleted;
+        }
+      }
+    } catch {
+      stats = { ...CLEAN_STATS };
+    }
+    gitStatsCache.set(cwd, {
+      stats,
+      branch: cached?.branch,
+      lastCheck: now,
+    });
+    return stats;
   }
-  gitStatsCache.set(cwd, { stats, at: now });
-  return stats;
+
+  return getCachedGitInfo(cwd, now).stats;
 }
 
 /**
@@ -322,31 +536,31 @@ export function isWorktreeDirty(
 }
 
 /**
- * Branch icon + name color: the orange slot (`thinkingMax` → stylix
- * `orange` #ff9c6a). NOTE: this is NOT the `accent` token — in stylix
- * `accent` resolves to pink (#f17ac6). If you literally want accent,
- * change this to `"accent"`.
+ * Branch icon and name color, which is the orange slot (`thinkingMax` maps to
+ * stylix `orange` #ff9c6a). This is deliberately not the `accent` token,
+ * because stylix resolves `accent` to pink (#f17ac6). Use `"accent"` here if
+ * that is what you want.
  */
 export const BRANCH_COLOR: ThemeColor = "thinkingMax";
 
 /**
- * Basename of the cwd for the footer right side: just the folder name,
- * never the full path (`/a/b/proj` → `proj`). Non-string/empty input
- * (a half-initialized context at `session_start`) yields `"?"` instead of
- * throwing — a throwing footer render blanks the whole footer area.
+ * Basename of the cwd for the footer, so only the folder name appears and never
+ * the full path (`/a/b/proj` gives `proj`). Non-string or empty input, which a
+ * half-initialized context at `session_start` produces, yields `"?"` instead of
+ * throwing, because a throwing footer render blanks the whole footer area.
  */
 export function folderNameForFooter(cwd: unknown): string {
   if (typeof cwd !== "string" || cwd.length === 0) return "?";
   // `basename` follows the host path semantics, so a Windows cwd
-  // (`C:\a\b`) also resolves to its last segment — `split("/")` would not.
+  // (`C:\a\b`) also resolves to its last segment. `split("/")` would not.
   const name = basename(cwd);
   return name.length > 0 ? name : cwd;
 }
 
-/** Minimal theme surface the footer render needs (real `Theme` satisfies it). */
+/** The only theme API the footer render needs. A real `Theme` satisfies it. */
 export type FooterTheme = Pick<Theme, "fg">;
 
-/** Live footer data. Built per-render from `ExtensionContext` + provider. */
+/** Live footer data, rebuilt per render from `ExtensionContext` and the provider. */
 export interface WrappedFooterSource {
   getCwd(): string;
   getSessionName(): string | undefined;
@@ -365,20 +579,20 @@ export interface WrappedFooterSource {
   getStatuses(): ReadonlyMap<string, string>;
 }
 
-/** Test hooks: deterministic time and injectable git readers. */
+/** Test hooks for deterministic time and injectable git readers. */
 export interface FooterRenderOptions {
   now?: number;
   readers?: GitReaders;
 }
 
 /**
- * Status keys pinned to the front of the statuses line, in order.
- * Everything else keeps the stock alphabetical order after them.
- * (`plan-mode` = @hank-warren/pi-plan-mode.)
+ * Status keys pinned to the front of the statuses line, in this order.
+ * Everything else keeps the stock alphabetical order after them. `plan-mode`
+ * belongs to @hank-warren/pi-plan-mode.
  */
 export const STATUS_PIN_FIRST: string[] = ["plan-mode"];
 
-/** Pinned keys first (in listed order), the rest alphabetically. */
+/** Pinned keys first in the listed order, then the rest alphabetically. */
 export function sortStatusKeys(keys: Iterable<string>): string[] {
   const all = [...keys];
   const pinned = STATUS_PIN_FIRST.filter((key) => all.includes(key));
@@ -389,12 +603,11 @@ export function sortStatusKeys(keys: Iterable<string>): string[] {
 }
 
 /**
- * Render the wrapped footer: stock pwd + stats lines, then the statuses line
- * with every registered rewrite applied (sorted by key, like stock).
- *
- * Never throws: a throwing footer render blanks the whole footer area, so
- * failures are logged to `footerLogPath()` and a one-line placeholder is
- * returned instead.
+ * Render the wrapped footer. The stock pwd and stats lines come first, then the
+ * statuses line with every registered rewrite applied and sorted by key, like
+ * stock. This never throws, because a throwing footer render blanks the whole
+ * footer area. Failures are logged to `footerLogPath()` and a one-line
+ * placeholder is returned.
  */
 export function renderWrappedFooter(
   width: number,
@@ -406,11 +619,11 @@ export function renderWrappedFooter(
     return renderWrappedFooterUnsafe(width, theme, source, options);
   } catch (error) {
     logFooterError("render failed", error);
-    // Keep the fallback inside the frame width: an over-wide line would wrap
-    // and shove the whole footer area around.
+    // The fallback stays inside the frame width, since an over-wide line would
+    // wrap and shove the whole footer area around.
     return [
       truncateToWidth(
-        `[footer error — ${footerLogPath()}]`,
+        `[footer error: ${footerLogPath()}]`,
         width,
         theme.fg("dim", "..."),
       ),
@@ -418,19 +631,66 @@ export function renderWrappedFooter(
   }
 }
 
-/** Debug log for footer failures (see `renderWrappedFooter`). */
+/** Debug log for footer failures (see `renderWrappedFooter`). Safe per-user path. */
 export function footerLogPath(): string {
-  return join(tmpdir(), "pi-ui-enhanced-footer.log");
+  try {
+    if (process.env.XDG_STATE_HOME) {
+      return join(
+        process.env.XDG_STATE_HOME,
+        "pi",
+        "pi-ui-enhanced-footer.log",
+      );
+    }
+    const home = homedir();
+    if (home) {
+      return join(home, ".pi", "logs", "pi-ui-enhanced-footer.log");
+    }
+  } catch {
+    // homedir() or env might fail in restricted environments
+  }
+  const user =
+    (typeof process.getuid === "function" ? process.getuid() : undefined) ??
+    process.env.USER ??
+    process.env.USERNAME ??
+    "user";
+  return join(tmpdir(), `pi-ui-enhanced-footer-${user}.log`);
 }
 
+/** Entries of the same kind are logged at most once per window; the log has no rotation. */
+const LOG_THROTTLE_MS = 60000;
+
+/** Clock per message kind for the throttle above. */
+const lastLoggedAt = new Map<string, number>();
+
+/**
+ * Log a footer failure. A persistent render failure fires on every frame, and
+ * the log has no rotation, so errors of the same kind are written at most once
+ * per `LOG_THROTTLE_MS`.
+ */
 function logFooterError(message: string, error: unknown): void {
   try {
+    const now = Date.now();
+    const last = lastLoggedAt.get(message) ?? -Infinity;
+    if (now - last < LOG_THROTTLE_MS) return;
+    lastLoggedAt.set(message, now);
     const detail =
       error instanceof Error ? (error.stack ?? error.message) : String(error);
-    appendFileSync(
-      footerLogPath(),
-      `${new Date().toISOString()} ${message}: ${detail}\n`,
-    );
+    const line = `${new Date().toISOString()} ${message}: ${detail}\n`;
+    const logPath = footerLogPath();
+    try {
+      mkdirSync(dirname(logPath), { recursive: true });
+      appendFileSync(logPath, line, { mode: 0o600 });
+      return;
+    } catch {
+      // Primary log path failed (e.g. read-only filesystem or permissions)
+    }
+    const user =
+      (typeof process.getuid === "function" ? process.getuid() : undefined) ??
+      process.env.USER ??
+      process.env.USERNAME ??
+      "user";
+    const fallbackPath = join(tmpdir(), `pi-ui-enhanced-footer-${user}.log`);
+    appendFileSync(fallbackPath, line, { mode: 0o600 });
   } catch {
     // Logging must never break the footer either.
   }
@@ -442,17 +702,19 @@ function renderWrappedFooterUnsafe(
   source: WrappedFooterSource,
   options: FooterRenderOptions,
 ): string[] {
-  // Left line: folder icon + basename only, never the full path.
-  // (`~/project (main) • session` → `\uF07B project (main) • session`.)
+  // The left line shows the folder icon and the basename only, never the full
+  // path: `~/project (main) • session` becomes
+  // `\uF07B project (main) • session`.
   let pwd = theme.fg(
     FOLDER_COLOR,
     `${FOLDER_ICON} ${folderNameForFooter(source.getCwd())}`,
   );
   const branch = source.getBranch();
   if (branch) {
-    // Dirty worktree (`*`) + diff numbers, cached (see GIT_DIRTY_TTL_MS)
-    // so git subprocesses do not run on every footer render.
-    // `main* \uF07C +19 ~48 -2` — zero components are hidden.
+    // The dirty marker (`*`) and the diff numbers come from the
+    // GIT_DIRTY_TTL_MS cache, so git subprocesses do not run on every render.
+    // The result looks like `main* \uF07C +19 ~48 -2`, and components that
+    // equal zero are left out.
     const stats = getWorktreeStats(
       source.getCwd(),
       options.now,
@@ -467,7 +729,8 @@ function renderWrappedFooterUnsafe(
       if (stats.untracked > 0) {
         parts.push(theme.fg(BRANCH_COLOR, `~${stats.untracked}`));
       }
-      // Same `dim` as the secondary footer text (tokens/context/model).
+      // The same `dim` that the secondary footer text uses (tokens, context,
+      // model).
       pwd += ` ${theme.fg("muted", DIFF_ICON)} ${parts.join(" ")}`;
     }
   }
@@ -509,10 +772,10 @@ function renderWrappedFooterUnsafe(
     statsLine = truncateToWidth(statsLeft, width, "...");
   }
 
-  // Stock dims stats parts separately so an inner reset (colored context %)
-  // cannot clear the outer dim.
+  // Stock dims the stats parts separately so that an inner reset (the colored
+  // context percentage) cannot clear the outer dim.
   const dimmedStatsLeft = theme.fg("dim", statsLeft);
-  // Slice by the *raw* length: `statsLeft` may carry ANSI, and slicing by its
+  // Slice by the raw length. `statsLeft` may carry ANSI, and slicing by its
   // visible length would leave a tail of the status text duplicated below.
   const remainder = statsLine.slice(statsLeft.length);
   const lines = [
@@ -539,14 +802,14 @@ function readNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-/** Cumulative token totals plus the newest assistant cache hit rate, like stock. */
+/** Cumulative token totals plus the cache hit rate of the newest assistant message, like stock. */
 export interface UsageTotals {
   input: number;
   output: number;
   cacheRead: number;
   cacheWrite: number;
   cost: number;
-  /** Cache hit rate (%) of the newest assistant message, when it had prompt tokens. */
+  /** Cache hit rate in percent for the newest assistant message, set only when it had prompt tokens. */
   latestCacheHitRate?: number;
 }
 
@@ -603,7 +866,7 @@ function sumEntryUsage(entries: readonly unknown[]): UsageTotals {
   return totals;
 }
 
-/** Token sums are reused for this long (the footer renders far more often than they change). */
+/** Token sums are reused for this long because the footer renders far more often than they change. */
 export const USAGE_CACHE_MS = 100;
 
 let usageCache:
@@ -617,9 +880,9 @@ export function clearUsageCache(): void {
 
 /**
  * Token totals for `entries`, memoized briefly. `sessionManager.getEntries()`
- * returns a fresh array each call, so the cache keys on its length and last
- * entry object — appends and compactions invalidate it, and the short TTL keeps
- * a message being mutated in place during streaming from going stale.
+ * returns a fresh array on every call, so the cache keys on its length and its
+ * last entry object. Appends and compactions invalidate it, and the short TTL
+ * keeps a message that streaming mutates in place from going stale.
  */
 export function readUsageTotals(
   entries: readonly unknown[],
@@ -666,7 +929,20 @@ export function createFooterSourceFromContext(
     },
     getBranch: () => {
       try {
-        return footerData.getGitBranch();
+        const fromFooter = footerData.getGitBranch();
+        if (
+          fromFooter !== null &&
+          fromFooter !== undefined &&
+          fromFooter !== ""
+        ) {
+          return fromFooter;
+        }
+      } catch {
+        // ignore
+      }
+      try {
+        const cwd = ctx.sessionManager?.getCwd?.() || ctx.cwd;
+        return getCachedGitBranch(cwd) || null;
       } catch {
         return null;
       }
@@ -703,7 +979,7 @@ export function createFooterSourceFromContext(
       try {
         totals = readUsageTotals(ctx.sessionManager.getEntries());
       } catch {
-        // Best effort; an empty stats cell still renders a valid footer.
+        // Best effort. An empty stats cell still renders a valid footer.
       }
       const parts: string[] = [];
       if (totals.input) parts.push(`↑${formatTokens(totals.input)}`);
@@ -751,9 +1027,22 @@ export function createFooterSourceFromContext(
   };
 }
 
-/** Install our footer (with rewrites). Re-call with a fresh `ctx` to refresh. */
+/** Install our footer with its rewrites. Call it again with a fresh `ctx` to refresh. */
 export function installWrappedFooter(ctx: ExtensionContext): void {
-  ctx.ui.setFooter((_tui, theme, footerData) => {
+  activeContext = ctx;
+  ctx.ui.setFooter((tui, theme, footerData) => {
+    setGitRenderCallback(() => {
+      try {
+        tui.requestRender();
+      } catch {
+        try {
+          (ctx.ui as { requestRender?: () => void }).requestRender?.();
+        } catch {
+          // ignore
+        }
+      }
+    });
+
     const component: Component = {
       render: (width: number) =>
         renderWrappedFooter(
@@ -769,21 +1058,18 @@ export function installWrappedFooter(ctx: ExtensionContext): void {
 
 /** Restore the stock footer. */
 export function restoreDefaultFooter(ctx: ExtensionContext): void {
+  setGitRenderCallback(undefined);
+  activeContext = undefined;
   ctx.ui.setFooter(undefined);
 }
 
 /**
- * Single-owner guard for double-loaded copies.
+ * Coordinates UI ownership between multiple loaded instances.
  *
- * `pi -e ./local-copy` loads alongside the installed package: two module
- * instances, two sets of handlers. Footer/editor setters are last-writer-
- * wins and CLI `-e` paths load after discovery, so the last-loaded instance
- * must win deterministically. Each instance creates its own ownership object
- * and claims the shared key at setup; every UI write is then gated on
- * `isOwner()`, so the stale (installed) copy stays silent.
- *
- * `release()` exists for tests; production copies keep the claim for the whole
- * pi process (releasing on session_shutdown would leave nobody owning the UI).
+ * When loading both a local copy and an installed package, two module
+ * instances run simultaneously. Each instance creates an ownership object.
+ * Calling `claim()` sets the active token on `globalThis`. Only the instance
+ * holding the active token performs UI writes.
  */
 export function createInstanceOwnership(key: string): {
   claim: () => void;
@@ -791,8 +1077,8 @@ export function createInstanceOwnership(key: string): {
   release: () => void;
 } {
   const token = {};
-  // SAFETY: globalThis is really a string-keyed record at runtime; the cast
-  // only gives us typed access to our own namespaced ownership key.
+  // SAFETY: globalThis is really a string-keyed record at runtime. The cast only
+  // gives typed access to our own namespaced ownership key.
   const store = globalThis as unknown as Record<string, unknown>;
   return {
     claim: () => {

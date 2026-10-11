@@ -9,28 +9,39 @@ import {
   clearUsageCache,
   countUntracked,
   DIFF_ICON,
+  footerLogPath,
+  getCachedGitBranch,
+  getCachedGitInfo,
+  GIT_DIRTY_TTL_MS,
+  GIT_MISS_TTL_MS,
   createFooterSourceFromContext,
   createInstanceOwnership,
   FOLDER_ICON,
   folderNameForFooter,
   getWorktreeStats,
   installWrappedFooter,
+  isGitRefreshing,
+  isGitStaleAt,
   isWorktreeDirty,
   parseNumstat,
+  parsePorcelainBranch,
   porcelainIsDirty,
   readUsageTotals,
   registerStatusRewrite,
   renderWrappedFooter,
   restoreDefaultFooter,
+  setCustomGitRunner,
+  setGitRenderCallback,
   sortStatusKeys,
   strike,
+  triggerGitRefresh,
   unregisterStatusRewrite,
   type FooterTheme,
   type WrappedFooterSource,
 } from "../src/status-wrap.ts";
 
-// The mcp status module and its tests live in test/mcp-status.test.ts; the
-// only cross-module case kept here is the footer rendering an arbitrary
+// The mcp status module and its tests live in test/mcp-status.test.ts. The
+// only cross-module case here is the footer rendering an arbitrary
 // registered rewrite, which needs no mcp import.
 
 const identityTheme: FooterTheme = { fg: (_color: string, text: string) => text };
@@ -67,7 +78,7 @@ test("register/unregister adds and removes a rewrite", () => {
   assert.equal(applyStatusRewrite("demo", "abc"), "ABC");
   off();
   assert.equal(applyStatusRewrite("demo", "abc"), "abc");
-  // Explicit unregister path.
+  // The explicit unregister path.
   registerStatusRewrite("demo", upper);
   unregisterStatusRewrite("demo", upper);
   assert.equal(applyStatusRewrite("demo", "abc"), "abc");
@@ -128,7 +139,7 @@ test("isWorktreeDirty caches per cwd within TTL", () => {
   assert.equal(isWorktreeDirty("/x", t, readers), false);
   assert.equal(isWorktreeDirty("/x", t + 1000, readers), false);
   assert.equal(calls, 1);
-  assert.equal(isWorktreeDirty("/x", t + 3000, readers), false);
+  assert.equal(isWorktreeDirty("/x", t + GIT_DIRTY_TTL_MS + 1000, readers), false);
   assert.equal(calls, 2);
   assert.equal(isWorktreeDirty(undefined, t, readers), false);
   clearGitDirtyCache();
@@ -209,7 +220,7 @@ test("diff numbers render after the branch with colors", () => {
     left.includes(`<muted>${DIFF_ICON}</>`),
     `diff icon must be dim like secondary text: ${left}`,
   );
-  // Order: +added, -deleted, ~untracked.
+  // Order is +added, then -deleted, then ~untracked.
   assert.ok(
     left.indexOf("+19") < left.indexOf("-2") &&
       left.indexOf("-2") < left.indexOf("~2"),
@@ -224,7 +235,8 @@ test("clean worktree hides the diff segment", () => {
   const wrappingTheme = {
     fg: (color: string, text: string) => `<${color}>${text}</>`,
   };
-  // Injected readers report a clean worktree (no git subprocess, no flakiness).
+  // The injected readers report a clean worktree, so the test runs no git
+  // subprocess.
   const lines = renderWrappedFooter(80, wrappingTheme, makeSource(), {
     now: 0,
     readers: { porcelain: () => "", numstat: () => "" },
@@ -453,9 +465,12 @@ test("instance ownership: last claimant wins, release frees the key", () => {
   try {
     installed.claim();
     assert.ok(installed.isOwner());
-    // CLI `-e` copy loads after discovery: it claims last and wins.
+    // Subsequent claimant takes ownership.
     local.claim();
     assert.ok(!installed.isOwner());
+    assert.ok(local.isOwner());
+    // Calling claim() repeatedly is idempotent.
+    local.claim();
     assert.ok(local.isOwner());
   } finally {
     installed.release();
@@ -534,4 +549,118 @@ test("cache hit rate is computed from the newest assistant usage", () => {
   assert.equal(totals.cacheRead, 300);
   assert.equal(totals.latestCacheHitRate?.toFixed(1), "75.0");
   clearUsageCache();
+});
+
+test("parsePorcelainBranch handles tracking, no-tracking, detached, and initial commits", () => {
+  assert.equal(parsePorcelainBranch("## main...origin/main [ahead 1]"), "main");
+  assert.equal(parsePorcelainBranch("## feature/xyz...origin/feature/xyz"), "feature/xyz");
+  assert.equal(parsePorcelainBranch("## main"), "main");
+  assert.equal(parsePorcelainBranch("## main [ahead 2]"), "main");
+  assert.equal(parsePorcelainBranch("## HEAD (no branch)"), "HEAD");
+  assert.equal(parsePorcelainBranch("## (detached from v1.0.0)"), "HEAD");
+  assert.equal(parsePorcelainBranch("## No commits yet on dev"), "dev");
+  assert.equal(parsePorcelainBranch("## Initial commit on main"), "main");
+  assert.equal(parsePorcelainBranch("not a branch line"), undefined);
+});
+
+test("footerLogPath returns a safe per-user path avoiding shared /tmp filename", () => {
+  const path = footerLogPath();
+  assert.ok(typeof path === "string" && path.length > 0);
+  assert.notEqual(path, "/tmp/pi-ui-enhanced-footer.log");
+});
+
+test("getCachedGitBranch returns empty string when not loaded without blocking", () => {
+  clearGitDirtyCache();
+  const branch = getCachedGitBranch("/non-existent-test-path-" + Date.now());
+  assert.equal(branch, "");
+  clearGitDirtyCache();
+});
+
+test("a failed git spawn is cached with the miss backoff and stops spawning git", async () => {
+  clearGitDirtyCache();
+  const missing = "/not-a-repo-" + Date.now();
+  let runnerCalls = 0;
+  setCustomGitRunner(async () => {
+    runnerCalls++;
+    return undefined;
+  });
+  try {
+    // First read triggers one doomed background refresh and returns no branch.
+    assert.equal(getCachedGitBranch(missing), "");
+    // Let the void-ed refresh finish (it stamps the cache entry in real time).
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const stamp = getCachedGitInfo(missing).lastCheck;
+    assert.ok(stamp > 0, "the miss entry is cached");
+    assert.equal(getCachedGitInfo(missing).missed, true);
+
+    // Past GIT_DIRTY_TTL_MS but within GIT_MISS_TTL_MS: the miss must be
+    // served from cache, protecting non-git directories from a spawn loop on
+    // every render cycle.
+    assert.equal(getCachedGitBranch(missing, stamp + GIT_DIRTY_TTL_MS + 1), "");
+    assert.equal(runnerCalls, 1);
+
+    // Past the miss backoff one new attempt is allowed.
+    assert.equal(getCachedGitBranch(missing, stamp + GIT_MISS_TTL_MS + 1), "");
+    assert.equal(runnerCalls, 2);
+  } finally {
+    setCustomGitRunner(undefined);
+    clearGitDirtyCache();
+  }
+});
+
+test("a successful git result is stale at the regular TTL, not the miss backoff", () => {
+  clearGitDirtyCache();
+  const entry = { stats: { dirty: false, added: 0, deleted: 0, untracked: 0 }, branch: "main", lastCheck: 0 };
+  assert.equal(isGitStaleAt(entry, false, GIT_DIRTY_TTL_MS - 1), false);
+  assert.equal(isGitStaleAt(entry, false, GIT_DIRTY_TTL_MS), true);
+  assert.equal(isGitStaleAt(entry, true, 0), true, "cwd change is always stale");
+  const miss = { ...entry, branch: undefined, missed: true };
+  assert.equal(isGitStaleAt(miss, false, GIT_DIRTY_TTL_MS), false);
+  assert.equal(isGitStaleAt(miss, false, GIT_MISS_TTL_MS), true);
+  clearGitDirtyCache();
+});
+
+test("triggerGitRefresh refreshes in background, guards concurrency, and notifies callback", async () => {
+  clearGitDirtyCache();
+  let callbackCalls = 0;
+  setGitRenderCallback(() => {
+    callbackCalls++;
+  });
+
+  const testCwd = "/virtual-test-repo";
+  let runnerCalls = 0;
+  setCustomGitRunner(async (_cwd, args) => {
+    runnerCalls++;
+    if (args.includes("-b")) {
+      return "## feature-branch...origin/feature-branch\n M file1.txt\n?? untracked.txt\n";
+    }
+    if (args.includes("--numstat")) {
+      return "5\t2\tfile1.txt\n";
+    }
+    return undefined;
+  });
+
+  try {
+    // Initial fetch
+    const p1 = triggerGitRefresh(testCwd);
+    assert.ok(isGitRefreshing(testCwd), "should be refreshing");
+    // Concurrent call should be ignored by guard
+    const p2 = triggerGitRefresh(testCwd);
+    await Promise.all([p1, p2]);
+    assert.equal(isGitRefreshing(testCwd), false);
+
+    // Cache should now have the resolved info
+    const info = getCachedGitInfo(testCwd);
+    assert.equal(info.branch, "feature-branch");
+    assert.equal(info.stats.dirty, true);
+    assert.equal(info.stats.added, 5);
+    assert.equal(info.stats.deleted, 2);
+    assert.equal(info.stats.untracked, 1);
+    assert.equal(callbackCalls, 1);
+    assert.equal(runnerCalls, 2);
+  } finally {
+    setCustomGitRunner(undefined);
+    setGitRenderCallback(undefined);
+    clearGitDirtyCache();
+  }
 });
