@@ -32,7 +32,7 @@ function makeEditor() {
   resetEditorWorkingState();
 
   const renderRequests: number[] = [];
-  // The base editor only needs `terminal.rows` and `requestRender` to render.
+  // The base editor needs only `terminal.rows` and `requestRender` to render.
   const tui = {
     terminal: { rows: 24 },
     requestRender() {
@@ -85,7 +85,7 @@ test("every frame line is exactly the requested width", () => {
 
 test("the frame never changes the editor's height", () => {
   // The host stacks the editor, the widgets and the footer into one live
-  // region, so growing the frame would shift everything below it.
+  // region, so a taller frame would push everything below it down.
   resetEditorWorkingState();
   const tui = {
     terminal: { rows: 24 },

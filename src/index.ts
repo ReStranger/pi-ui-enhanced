@@ -26,12 +26,7 @@ let currentThinkingLevel = "off";
 let activeTui: TUI | undefined;
 const STATUS_THINKING_WIDTH = 9;
 
-/**
- * Structural view of the stock StatusIndicator (working, retry, compaction,
- * branch summary) that pi embeds into the editor top border. The type is
- * intentionally structural: stock does not re-export StatusIndicator from the
- * package root, so importing it would couple us to an internal dist path.
- */
+/** Interface for status indicators rendered inside the editor top border. */
 export type EmbeddedStatusIndicator = {
   renderInBorder(width: number): string;
   renderSpinnerInBorder(width: number): string;
@@ -166,13 +161,7 @@ function hasBorderMetadata(line: string): boolean {
 }
 
 function getRenderedAutocompleteHeight(editor: CustomEditor): number {
-  // SAFETY: the runtime editor instance is the pi TUI Editor subclass, which
-  // records how many rows it appended for the autocomplete block in a private
-  // `renderedAutocompleteHeight` field. TypeScript hides that field from us,
-  // but reading it is safe and is the only way to stay in sync with the rows
-  // Editor.handleMouse hit-tests: rendering the list a second time here both
-  // cost an extra render per frame and measured it on a width the base editor
-  // never uses for its own layout.
+  // SAFETY: reads private renderedAutocompleteHeight from base editor for mouse hit testing.
   const height = (
     editor as unknown as { renderedAutocompleteHeight?: number }
   ).renderedAutocompleteHeight;
@@ -181,21 +170,16 @@ function getRenderedAutocompleteHeight(editor: CustomEditor): number {
 }
 
 function getScrollOffset(editor: CustomEditor): number {
-  // SAFETY: the runtime editor instance is the pi TUI Editor subclass, which
-  // keeps the first hidden line index in a private `scrollOffset` field.
-  // TypeScript hides that field from us, but reading it right after
-  // super.render() (which just recomputed it) is safe and is the only way to
-  // rebuild the top border at the frame width instead of the inner width.
+  // SAFETY: reads private scrollOffset from base editor to align top border width.
   const offset = (editor as unknown as { scrollOffset?: number }).scrollOffset;
 
   return typeof offset === "number" ? offset : 0;
 }
 
 export class RoundedEditor extends CustomEditor {
-  // Named to avoid clashing with CustomEditor's own private
-  // `workingStatusIndicator` (which its setWorkingStatusIndicator writes and
-  // its renderTopBorder reads — neither is used here since both are
-  // overridden).
+  // CustomEditor has its own private `workingStatusIndicator`. This field
+  // avoids that name, and neither the base setter nor the base top border
+  // matters here because both are overridden.
   private embeddedStatusIndicator: EmbeddedStatusIndicator | undefined;
 
   constructor(
@@ -203,9 +187,9 @@ export class RoundedEditor extends CustomEditor {
     theme: EditorTheme,
     keybindings: KeybindingsManager,
   ) {
-    // embedWorkingStatus makes stock InteractiveMode route its working,
-    // compaction, retry, and branch-summary indicators to this editor via
-    // setWorkingStatusIndicator instead of a separate status line below.
+    // embedWorkingStatus makes stock InteractiveMode send its working,
+    // compaction, retry, and branch-summary indicators to this editor through
+    // setWorkingStatusIndicator instead of a status line below.
     super(tui, theme, keybindings, { embedWorkingStatus: true });
     activeTui = tui;
   }
@@ -217,11 +201,7 @@ export class RoundedEditor extends CustomEditor {
     activeTui?.requestRender();
   }
 
-  // Rounded port of the stock CustomEditor top border: the active status
-  // indicator (if any) is embedded into the border, with the scroll overflow
-  // label sharing the line when it fits and collapsing to a spinner when it
-  // does not. Width accounting mirrors stock, with two extra cells reserved
-  // for the ╭/╮ corners.
+  // Renders the rounded top border with status indicator and scroll indicators.
   protected override renderTopBorder(
     width: number,
     hiddenLineCount: number,
@@ -323,9 +303,8 @@ export class RoundedEditor extends CustomEditor {
     );
     const extra = lines.slice(bottomBorderIndex + 1);
     const hasAutocomplete = autocompleteLineCount > 0;
-    // The embedded indicator and the scroll label are rebuilt at the full
-    // frame width from the fresh scroll offset; lines[0] (rendered by
-    // super.render at the inner width) is intentionally discarded.
+    // The top border is rebuilt at the full frame width from the current scroll
+    // offset. lines[0] came from super.render at the inner width, so we drop it.
     const topBorder = this.renderTopBorder(width, getScrollOffset(this));
     const bottomBorderLine = lines[bottomBorderIndex] ?? "";
 
@@ -349,9 +328,10 @@ export class RoundedEditor extends CustomEditor {
       return [topBorder, ...content, bottomBorder];
     }
 
-    // The tee sits in the base bottom-border slot, so the list must keep
-    // starting at renderedVisibleLineCount + 2, where base Editor.handleMouse
-    // hit-tests it. This frame is one row taller than the base editor.
+    // The tee occupies the base bottom-border slot, so the suggestion list must
+    // still start at renderedVisibleLineCount + 2, the row where base
+    // Editor.handleMouse hit-tests it. This frame is one row taller than the
+    // base editor renders.
     const tee = hasBorderMetadata(bottomBorderLine)
       ? buildBorderFromBaseLine(
           width,
@@ -371,11 +351,7 @@ export class RoundedEditor extends CustomEditor {
     ];
   }
 
-  // The frame shifts every base-editor column one cell right (the left border)
-  // and narrows the content by both border columns, but Editor.handleMouse maps
-  // a raw event straight onto its own columns. Undo both before delegating, so
-  // autocomplete clicks and click-to-place-cursor land on the cell the user
-  // actually pointed at instead of one column off.
+  // Offsets mouse event coordinates to account for one-cell border padding.
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     return super.handleMouse({
       ...event,
