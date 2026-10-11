@@ -18,6 +18,7 @@ import {
   MCP_SETTLE_DELAYS_MS,
   MCP_STATUS_KEY,
   MCP_TOOL_PREFIX,
+  normalizeServerName,
   parseMcpStatus,
   registerMcpShortStatus,
   rememberMcpCounts,
@@ -133,9 +134,9 @@ test("toolServerNames reads namespaces, falls back to the name, and dedupes", ()
     toolServerNames([
       { name: "mcp__mcp-nixos__nix", namespace: { name: "mcp__mcp-nixos" } },
       { name: "mcp__mcp-nixos__search", namespace: { name: "mcp__mcp-nixos" } },
-      // No namespace: cut at the first `__`.
+      // No namespace, so the name is cut at the first `__`.
       { name: "mcp__sentry__whoami" },
-      // Not MCP.
+      // Not an MCP tool.
       { name: "read" },
       { name: "mcp__weird" },
       { name: "mcp____tool" },
@@ -149,8 +150,8 @@ test("toolServerNames reads namespaces, falls back to the name, and dedupes", ()
 });
 
 test("deriveMcpCounts adds tool-only servers without double counting", () => {
-  // `a` is in the registry; `mcp-nixos` only exists as a tool namespace
-  // (mcp.json servers never reach the registry).
+  // `a` is in the registry and `mcp-nixos` exists only as a tool namespace,
+  // since mcp.json servers never reach the registry.
   assert.deepEqual(
     deriveMcpCounts(
       [{ name: "a", config: { command: "npx" } }],
@@ -162,15 +163,15 @@ test("deriveMcpCounts adds tool-only servers without double counting", () => {
     ),
     { enabled: 2, disabled: 0 },
   );
-  // A disabled registered server keeps its `|N` slot and is not re-counted
-  // through its (hidden but still registered) tools.
+  // A disabled registered server keeps its `|N` slot. Its tools stay
+  // registered, but they must not be counted a second time.
   assert.deepEqual(
     deriveMcpCounts([{ name: "off", config: { enabled: false } }], [
       { name: "mcp__off__tool", namespace: { name: "mcp__off" } },
     ]),
     { enabled: 0, disabled: 1 },
   );
-  // A failing getAllTools() must not lose the registry counts.
+  // A throwing getAllTools() must not lose the registry counts.
   assert.deepEqual(
     deriveMcpCounts([{ name: "a", config: {} }], undefined),
     { enabled: 1, disabled: 0 },
@@ -274,7 +275,7 @@ test("rewriteMcpStatus prefers live counts over the parse fallback", () => {
       rewriteMcpStatus("🔌 MCP: 4 servers enabled"),
       formatMcpShort({ enabled: 4, disabled: 0 }),
     );
-    // With no counts at all the parse fallback applies.
+    // With no counts at all the parser takes over.
     clearMcpCounts();
     assert.equal(
       rewriteMcpStatus("🔌 MCP: 4 servers enabled (1 disabled)"),
@@ -336,7 +337,7 @@ test("subscribeMcpServers updates on mcp_servers_change", () => {
   try {
     fake.emit("session_start", ctx);
     fake.emit("mcp_servers_change", ctx);
-    // The registry is read again on every event.
+    // Every event reads the registry again.
     assert.ok(calls.length >= 2);
     assert.deepEqual(calls.at(-1), [MCP_STATUS_KEY, formatMcpShort({ enabled: 2, disabled: 0 })]);
   } finally {
@@ -347,7 +348,6 @@ test("subscribeMcpServers updates on mcp_servers_change", () => {
 
 test("subscribeMcpServers clears its own published status but never clobbers a foreign key", () => {
   clearMcpCounts();
-  // First run: servers exist, we publish.
   const fake = makeFakePi();
   const { ctx, calls } = makeFakeCtx();
   const off = subscribeMcpServers(fake.pi as any);
@@ -355,7 +355,8 @@ test("subscribeMcpServers clears its own published status but never clobbers a f
     fake.emit("session_start", ctx);
     assert.ok(calls.some(([key, text]) => key === MCP_STATUS_KEY && text !== undefined));
 
-    // Second run with no servers: our own key gets cleared (published = true).
+    // The second run has no servers, so our own key is cleared because it was
+    // published by the first run.
     off();
     clearMcpCounts();
     const emptyFake = makeFakePi({ servers: [] });
@@ -395,7 +396,7 @@ test("subscribeMcpServers survives a throwing getAllTools", () => {
   const off = subscribeMcpServers(fake.pi as any);
   try {
     assert.doesNotThrow(() => fake.emit("session_start", ctx));
-    // The registry half still publishes.
+    // The registry half of the count still publishes.
     assert.deepEqual(calls, [[MCP_STATUS_KEY, formatMcpShort({ enabled: 2, disabled: 0 })]]);
   } finally {
     off();
@@ -428,14 +429,14 @@ test("the settle schedule picks up servers that connect after session_start", (t
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const off = subscribeMcpServers(fake.pi as any);
   try {
-    // Nothing configured yet: no status, so no write.
+    // Nothing is configured yet, so there is no status to write.
     fake.emit("session_start", ctx);
     assert.deepEqual(calls, []);
     // Core connects the mcp.json servers a tick later.
     tools = [{ name: "mcp__mcp-nixos__nix", namespace: { name: "mcp__mcp-nixos" } }];
     t.mock.timers.tick((MCP_SETTLE_DELAYS_MS.at(-1) ?? 0) + 1);
     assert.deepEqual(calls, [[MCP_STATUS_KEY, formatMcpShort({ enabled: 1, disabled: 0 })]]);
-    // Unchanged counts must not write again.
+    // The same counts must not write a second time.
     t.mock.timers.tick((MCP_SETTLE_DELAYS_MS.at(-1) ?? 0) + 1);
     assert.equal(calls.length, 1);
   } finally {
@@ -503,12 +504,13 @@ test("agent_settled refreshes the count for servers that connect silently", () =
   try {
     fake.emit("session_start", ctx);
     assert.deepEqual(calls, []);
-    // `/mcp` OAuth finished: tools appear with no extension event.
+    // The `/mcp` OAuth flow finished, so the tools appear without an
+    // extension event.
     tools = [{ name: "mcp__sentry__whoami", namespace: { name: "mcp__sentry" } }];
     fake.emit("agent_settled", ctx);
     assert.deepEqual(calls, [[MCP_STATUS_KEY, formatMcpShort({ enabled: 1, disabled: 0 })]]);
-    // A structural event re-writes the same value (core wipes statuses on
-    // rebind, so our own "already published" flag cannot be trusted there).
+    // A structural event writes the same value again. Core wipes statuses on
+    // rebind, so our own "already published" flag cannot be trusted there.
     fake.emit("session_start", ctx);
     assert.equal(calls.length, 2);
   } finally {
@@ -543,7 +545,7 @@ test("subscribeMcpServers unsubscribe removes handlers and drops counts", () => 
   assert.equal(fake.handlerFor("agent_settled"), undefined);
   assert.equal(fake.handlerFor("session_shutdown"), undefined);
   assert.equal(currentMcpCounts(), undefined);
-  // Emission after unsubscribe is a no-op.
+  // An event after unsubscribe does nothing.
   assert.doesNotThrow(() => fake.emit("session_start", ctx));
 });
 
@@ -553,4 +555,90 @@ test("counts stay readable through currentMcpCounts", () => {
   assert.deepEqual(currentMcpCounts(), { enabled: 1, disabled: 0 });
   clearMcpCounts();
   assert.equal(currentMcpCounts(), undefined);
+});
+
+test("normalizeServerName normalizes hyphens, underscores, and casing", () => {
+  assert.equal(normalizeServerName("dev-radius"), "dev_radius");
+  assert.equal(normalizeServerName("dev_radius"), "dev_radius");
+  assert.equal(normalizeServerName("dev-radius"), normalizeServerName("dev_radius"));
+  assert.equal(normalizeServerName("Dev-Radius"), normalizeServerName("dev_radius"));
+  assert.equal(normalizeServerName("MY-MCP-SERVER"), "my_mcp_server");
+  assert.equal(
+    normalizeServerName("multi-part-server-name"),
+    normalizeServerName("multi_part_server_name"),
+  );
+});
+
+test("deriveMcpCounts deduplicates configured server dev-radius with tool mcp__dev_radius__some_tool", () => {
+  // A server named `dev-radius` is registered and its tool uses `dev_radius` in name.
+  // Count must be 1, not 2.
+  assert.deepEqual(
+    deriveMcpCounts(
+      [{ name: "dev-radius", config: { command: "npx" } }],
+      [{ name: "mcp__dev_radius__some_tool" }],
+    ),
+    { enabled: 1, disabled: 0 },
+  );
+
+  // With namespace as well
+  assert.deepEqual(
+    deriveMcpCounts(
+      [{ name: "dev-radius", config: { command: "npx" } }],
+      [{ name: "mcp__dev_radius__some_tool", namespace: { name: "mcp__dev-radius" } }],
+    ),
+    { enabled: 1, disabled: 0 },
+  );
+
+  // Disabled server named `dev-radius` with tool `mcp__dev_radius__some_tool`
+  assert.deepEqual(
+    deriveMcpCounts(
+      [{ name: "dev-radius", config: { enabled: false } }],
+      [{ name: "mcp__dev_radius__some_tool" }],
+    ),
+    { enabled: 0, disabled: 1 },
+  );
+});
+
+test("toolServerNames deduplicates hyphens and underscores for the same server", () => {
+  const tools = [
+    { name: "mcp__dev-radius__tool1", namespace: { name: "mcp__dev-radius" } },
+    { name: "mcp__dev_radius__tool2" },
+  ];
+  const names = toolServerNames(tools);
+  assert.equal(names.length, 1);
+  assert.equal(normalizeServerName(names[0]), "dev_radius");
+});
+
+test("subscribeMcpServers deduplicates dev-radius and dev_radius in published status", () => {
+  clearMcpCounts();
+  const fake = makeFakePi({
+    servers: [{ name: "dev-radius", config: { command: "npx" } }],
+    tools: [{ name: "mcp__dev_radius__some_tool" }],
+  });
+  const { ctx, calls } = makeFakeCtx();
+  const off = subscribeMcpServers(fake.pi as any);
+  try {
+    fake.emit("session_start", ctx);
+    assert.deepEqual(currentMcpCounts(), { enabled: 1, disabled: 0 });
+    assert.deepEqual(calls, [[MCP_STATUS_KEY, formatMcpShort({ enabled: 1, disabled: 0 })]]);
+  } finally {
+    off();
+    clearMcpCounts();
+  }
+});
+
+test("registerMcpShortStatus unsubscribe properly removes rewrite listener", () => {
+  clearStatusRewrites();
+  clearMcpCounts();
+  const unregister = registerMcpShortStatus();
+  assert.equal(
+    applyStatusRewrite(MCP_STATUS_KEY, "MCP: 1 server enabled"),
+    `${MCP_ICON} mcp 1`,
+  );
+  unregister();
+  // After unregistering, the rewrite is no longer applied and returns the raw status
+  assert.equal(
+    applyStatusRewrite(MCP_STATUS_KEY, "MCP: 1 server enabled"),
+    "MCP: 1 server enabled",
+  );
 });

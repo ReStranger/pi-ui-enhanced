@@ -11,41 +11,11 @@ import {
 } from "./status-wrap.ts";
 
 /**
- * Short `mcp` status: `<icon> mcp 4|1` (the `|N` suffix appears only when
- * N > 0).
+ * Publishes the MCP footer status in `<icon> mcp <enabled>|<disabled>` format.
  *
- * Since pi 0.99 MCP support is built in (`~/.pi/agent/mcp.json`,
- * `.pi/mcp.json`, `pi mcp add`, `/mcp` manager) and the built-in extension
- * publishes **no** footer status at all. This module therefore provides the
- * status itself:
- *
- *  1. counts are derived from two public signals and pushed via
- *     `ctx.ui.setStatus`, so the stock footer (and our wrapped footer) pick the
- *     key up:
- *     - `pi.getMcpServers()` — the registry of servers *extensions*
- *       registered with `pi.registerMcpServer()`. This is also the only place
- *       `enabled: false` is visible, so it feeds the `|N` suffix;
- *     - `pi.getAllTools()` — the tool list. Servers from `mcp.json` never
- *       reach the registry (core's mcp extension keeps them in a private list,
- *       `extensions/mcp/index.ts`), but a connected one registers its tools
- *       under the `mcp__<server>` namespace, so the namespace names recover
- *       exactly those servers;
- *  2. if the third-party `pi-mcp-adapter` package is installed instead, it
- *     owns the `mcp` key and we fall back to parsing its long status text
- *     (`"N servers enabled (D disabled)"`), like before the switch.
- *
- * Transient states (`connecting…`, `Authenticating…`) pass through untouched.
- *
- * KNOWN LIMITATION (both signals are all the public API offers): the number is
- * *connected* servers. A configured server that never finished its handshake
- * (an HTTP server waiting for `/mcp` OAuth) contributes no tools, so it stays
- * invisible until it connects. Per-server connection state is internal to the
- * built-in extension, and the `mcp.json` files themselves are not exposed.
- *
- * Connections are established *after* `session_start` (core defers the client
- * load by one event-loop turn), so a refresh also runs on a short settle
- * schedule and after every turn; `publishStatus` writes only when the text
- * actually changes, so those extra refreshes cost nothing.
+ * Server counts come from `pi.getMcpServers()` and tool namespaces from
+ * `pi.getAllTools()`. If `pi-mcp-adapter` owns the status key, this module parses
+ * its text. Transient statuses like `connecting` pass through unchanged.
  */
 
 export const MCP_STATUS_KEY = "mcp";
@@ -53,11 +23,7 @@ export const MCP_STATUS_KEY = "mcp";
 /** Namespace prefix core puts on MCP tool definitions: `mcp__<server>`. */
 export const MCP_TOOL_PREFIX = "mcp__";
 
-/**
- * Nerd Font icon for the short status (fa-plug). Written as an escape because
- * literal PUA glyphs do not survive chat transport. Replace with your own
- * single-cell glyph, e.g. `export const MCP_ICON = "\uF1E6";`.
- */
+/** Nerd Font plug icon (fa-plug, U+F1E6). */
 export const MCP_ICON = "\uF1E6";
 
 export interface McpCounts {
@@ -92,12 +58,13 @@ export function currentMcpCounts(): McpCounts | undefined {
   return counts;
 }
 
+export function normalizeServerName(name: string): string {
+  return name.replace(/-/g, "_").toLowerCase();
+}
+
 /**
- * Server name behind one tool definition, or `undefined` when the tool is not
- * an MCP tool. The `namespace.name` (`mcp__<server>`) is authoritative; the
- * `mcp__<server>__<tool>` name is only a fallback for definitions without a
- * namespace, and it cuts the server at the first `__` (a server name that
- * itself contains `__` can then collapse into another server's bucket).
+ * Extracts the MCP server name from a tool definition.
+ * Returns `undefined` if the tool does not belong to an MCP server.
  */
 function mcpServerNameFromTool(tool: unknown): string | undefined {
   if (typeof tool !== "object" || tool === null) return undefined;
@@ -122,18 +89,18 @@ export function toolServerNames(tools: readonly unknown[] | undefined): string[]
   const seen = new Set<string>();
   for (const tool of tools ?? []) {
     const server = mcpServerNameFromTool(tool);
-    if (server === undefined || seen.has(server)) continue;
-    seen.add(server);
+    if (server === undefined) continue;
+    const key = normalizeServerName(server);
+    if (seen.has(key)) continue;
+    seen.add(key);
     names.push(server);
   }
   return names;
 }
 
 /**
- * Pure: split servers into enabled/disabled by their `enabled` flag, then add
- * the servers that are only visible through their tools (`mcp.json` servers,
- * which never enter the registry). A server already in the registry is not
- * counted twice.
+ * Computes enabled and disabled server counts from registered servers and tool lists.
+ * Deduplicates names across both sources.
  */
 export function deriveMcpCounts(
   servers: readonly unknown[] | undefined,
@@ -146,7 +113,9 @@ export function deriveMcpCounts(
     if (typeof server !== "object" || server === null) continue;
     const record = server as { name?: unknown; config?: unknown };
     if (typeof record.name === "string" && record.name.length > 0) {
-      known.add(record.name);
+      const key = normalizeServerName(record.name);
+      if (known.has(key)) continue;
+      known.add(key);
     }
     const config = record.config;
     if (
@@ -160,8 +129,9 @@ export function deriveMcpCounts(
     }
   }
   for (const server of toolServerNames(tools)) {
-    if (known.has(server)) continue;
-    known.add(server);
+    const key = normalizeServerName(server);
+    if (known.has(key)) continue;
+    known.add(key);
     enabled += 1;
   }
   return { enabled, disabled };
@@ -171,12 +141,12 @@ function readServers(pi: ExtensionAPI): readonly unknown[] | undefined {
   try {
     return pi.getMcpServers();
   } catch {
-    // Older pi without the API, or no runtime yet — treat as "no data".
+    // Older pi without the API, or no runtime yet. Treat as no data.
     return undefined;
   }
 }
 
-/** Tool list; the `mcp__<server>` namespaces are the only public trace of `mcp.json` servers. */
+/** Tool list, whose `mcp__<server>` namespaces are the only public trace of `mcp.json` servers. */
 function readTools(pi: ExtensionAPI): readonly unknown[] | undefined {
   try {
     return pi.getAllTools();
@@ -201,7 +171,7 @@ function isTransientStatus(plain: string): boolean {
   return /connecting|authenticating/i.test(plain);
 }
 
-/** `<icon> mcp 4|1` — accent-colored when a theme is available; `undefined` hides (zero servers). */
+/** `<icon> mcp 4|1`, accent-colored when a theme is available. `undefined` hides the status, which happens when there are no servers. */
 export function formatMcpShort(
   counts: McpCounts,
   theme?: FooterTheme,
@@ -219,7 +189,7 @@ export function rewriteMcpStatus(
   if (raw !== undefined && isTransientStatus(stripTerminalSequences(raw))) {
     return raw;
   }
-  // Live built-in counts win while any server is configured.
+  // The live counts win while any server is configured.
   if (counts && counts.enabled + counts.disabled > 0) {
     const short = formatMcpShort(counts, helpers?.theme);
     if (short !== undefined) return short;
@@ -231,15 +201,8 @@ export function rewriteMcpStatus(
 }
 
 /**
- * Push the current counts into the stock footer statuses. Only writes when a
- * server is configured, so an installed pi-mcp-adapter (which replaces the
- * built-in MCP support and owns the `mcp` key) is never clobbered; our own
- * key is cleared explicitly once we have published before.
- *
- * `force` rewrites an unchanged value. Structural events use it because core
- * wipes every extension status in `resetExtensionUI()` before rebinding, so
- * our own `publishedText` may still claim the key is set; the settle ticks and
- * the per-turn refresh skip the write when nothing changed.
+ * Updates the MCP status key in the footer.
+ * Only writes when server count is greater than zero, and skips redundant writes.
  */
 function publishStatus(ctx: ExtensionContext, force = false): void {
   if (!rendersEditorUi(ctx)) return;
@@ -254,7 +217,7 @@ function publishStatus(ctx: ExtensionContext, force = false): void {
     published = text !== undefined;
     publishedText = text;
   } catch {
-    // No UI surface in this mode; the footer just shows no mcp status.
+    // No UI surface in this mode, so the footer shows no mcp status.
   }
 }
 
@@ -264,13 +227,7 @@ function refreshCounts(pi: ExtensionAPI, ctx: ExtensionContext, force = false): 
   publishStatus(ctx, force);
 }
 
-/**
- * Re-derive delays (ms) after a structural event: core's mcp extension
- * connects servers a tick or more after `session_start`, so the tool list — and
- * with it the count — fills in later. Short and bounded on purpose: the
- * per-turn refresh in `subscribeMcpServers` is what keeps the count honest
- * afterwards (an OAuth sign-in through `/mcp` connects a server with no event).
- */
+/** Delays in milliseconds for retrying server count derivation after session start. */
 export const MCP_SETTLE_DELAYS_MS: readonly number[] = [250, 750, 1500, 3000, 6000];
 
 let settleTimers: Array<ReturnType<typeof setTimeout>> = [];
@@ -296,23 +253,24 @@ function scheduleSettle(pi: ExtensionAPI, ctx: ExtensionContext): void {
         // exception and take pi down with it.
       }
     }, delay);
-    // A status refresh must never hold the process open.
+    // A status refresh must never hold the process open, so the timer does not
+    // count as a pending handle.
     (timer as { unref?: () => void }).unref?.();
     settleTimers.push(timer);
   }
 }
 
 /**
- * Track the MCP servers (registry + tool namespaces) and publish the short
- * status. Call once per process (from `ensureStatusWrap`). Returns an
- * unsubscribe function.
+ * Subscribes to MCP server lifecycle events and updates status counts.
+ * Returns an unsubscribe callback.
  */
 export function subscribeMcpServers(pi: ExtensionAPI): () => void {
   const structural = (_event: unknown, ctx: ExtensionContext): void => {
     refreshCounts(pi, ctx, true);
     scheduleSettle(pi, ctx);
   };
-  // Cheap safety net for servers that connect without an event (`/mcp` OAuth).
+  // Covers servers that connect without an event, such as an OAuth sign-in
+  // through `/mcp`.
   const settled = (_event: unknown, ctx: ExtensionContext): void => {
     refreshCounts(pi, ctx);
   };
@@ -320,17 +278,18 @@ export function subscribeMcpServers(pi: ExtensionAPI): () => void {
   try {
     offs.push(pi.on("session_start", structural));
   } catch {
-    // Event surface missing — nothing to subscribe to.
+    // Older pi may not have the event surface, so there is nothing to
+    // subscribe to.
   }
   try {
     offs.push(pi.on("mcp_servers_change", structural));
   } catch {
-    // Ditto.
+    // Same as above.
   }
   try {
     offs.push(pi.on("agent_settled", settled));
   } catch {
-    // Older pi without the event — the settle schedule still covers startup.
+    // Older pi lacks this event, but the settle schedule still covers startup.
   }
   try {
     offs.push(
