@@ -4,18 +4,43 @@
   "description": "Improved UI extension for pi",
   "keywords": [
     "pi",
-    "pi-package"
+    "pi-coding-agent",
+    "pi-extension",
+    "tui",
+    "ui",
+    "status-line",
+    "rounded-editor",
+    "editor"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/restranger/pi-ui-enhanced.git"
+  },
+  "homepage": "https://github.com/restranger/pi-ui-enhanced#readme",
+  "bugs": {
+    "url": "https://github.com/restranger/pi-ui-enhanced/issues"
+  },
   "license": "MIT",
   "author": "ReStranger restranger@disroot.org",
   "type": "module",
   "main": "index.ts",
+  "types": "index.ts",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "src",
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
   "pi": {
     "extensions": [
       "./index.ts"
     ]
   },
   "scripts": {
+    "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts"
   },
@@ -24,8 +49,8 @@
     "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.99.1",
-    "@earendil-works/pi-tui": "^0.99.1",
+    "@earendil-works/pi-coding-agent": "^1.1.0",
+    "@earendil-works/pi-tui": "^1.1.0",
     "@types/node": "^24.19.0",
     "typescript": "^5.9.3"
   }
