@@ -14,7 +14,7 @@ import {
   rewriteLspStatus,
 } from "../src/lsp-status.ts";
 
-// Fake theme: wraps in <color>…</> so tests can assert the color key used.
+// Wraps in <color>…</> so assertions can read the color key.
 const fakeTheme = {
   fg: (color: string, text: string) => `<${color}>${text}</>`,
 };
@@ -46,9 +46,81 @@ test("parseLspStatus maps compact ✓ to a single active server", () => {
   assert.deepEqual(parseLspStatus("LSP ✓"), { active: 1, failed: 0 });
 });
 
-test("parseLspStatus maps inactive/✗ to zero", () => {
+test("parseLspStatus parses only failed verbose", () => {
+  assert.deepEqual(parseLspStatus("LSP Failed: rust-analyzer"), {
+    active: 0,
+    failed: 1,
+  });
+});
+
+test("parseLspStatus parses multiple failed verbose", () => {
+  assert.deepEqual(parseLspStatus("LSP Failed: rust, pyright"), {
+    active: 0,
+    failed: 2,
+  });
+});
+
+test("parseLspStatus parses both active and failed verbose", () => {
+  assert.deepEqual(
+    parseLspStatus("LSP Active: tsserver · LSP Failed: pyright"),
+    { active: 1, failed: 1 },
+  );
+});
+
+test("parseLspStatus maps compact failed only to failed count", () => {
+  assert.deepEqual(parseLspStatus("LSP ✗"), { active: 0, failed: 1 });
+});
+
+test("parseLspStatus parses compact both active and failed", () => {
+  assert.deepEqual(parseLspStatus("LSP ✓ · LSP ✗"), { active: 1, failed: 1 });
+});
+
+test("parseLspStatus ignores decorative check crosses outside the LSP marker", () => {
+  // A pi-lens theme or another plugin puts ✓/✗ glyphs in the same status line
+  // far from the `LSP` token; they must not inflate the counts.
+  assert.deepEqual(
+    parseLspStatus("lint ✓ · LSP ✓ · tests ✗"),
+    { active: 1, failed: 0 },
+  );
+  assert.deepEqual(
+    parseLspStatus("lint ✓ · tests ✗ · LSP ✗"),
+    { active: 0, failed: 1 },
+  );
+});
+
+test("parseLspStatus counts every compact LSP marker", () => {
+  assert.deepEqual(
+    parseLspStatus("LSP ✓ · LSP ✓ · LSP ✗"),
+    { active: 2, failed: 1 },
+  );
+});
+
+test("parseLspStatus maps inactive to zero", () => {
   assert.deepEqual(parseLspStatus("LSP Inactive"), { active: 0, failed: 0 });
-  assert.deepEqual(parseLspStatus("LSP ✗"), { active: 0, failed: 0 });
+});
+
+test("parseLspStatus handles empty string and whitespace", () => {
+  assert.deepEqual(parseLspStatus(""), { active: 0, failed: 0 });
+  assert.deepEqual(parseLspStatus("   "), { active: 0, failed: 0 });
+});
+
+test("parseLspStatus handles empty id lists and unknown formats", () => {
+  assert.deepEqual(parseLspStatus("LSP Active: "), { active: 0, failed: 0 });
+  assert.deepEqual(parseLspStatus("LSP Unknown status"), { active: 0, failed: 0 });
+});
+
+test("parseLspStatus parses reversed order of joined status", () => {
+  assert.deepEqual(
+    parseLspStatus("LSP Failed: rust · LSP Active: ts"),
+    { active: 1, failed: 1 },
+  );
+});
+
+test("parseLspStatus parses LSP Error prefix as failed", () => {
+  assert.deepEqual(
+    parseLspStatus("LSP Error: gopls"),
+    { active: 0, failed: 1 },
+  );
 });
 
 test("formatLspShort hides zero/zero", () => {
@@ -69,6 +141,21 @@ test("formatLspShort appends |failed when nonzero", () => {
   assert.equal(
     formatLspShort({ active: 2, failed: 1 }, fakeTheme),
     `<thinkingLow>${LSP_ICON} lsp 2|1</>`,
+  );
+});
+
+test("formatLspShort formats failed only", () => {
+  assert.equal(
+    formatLspShort({ active: 0, failed: 1 }, fakeTheme),
+    `<thinkingLow>${LSP_ICON} lsp 0|1</>`,
+  );
+  assert.equal(
+    formatLspShort({ active: 0, failed: 1 }, undefined),
+    `${LSP_ICON} lsp 0|1`,
+  );
+  assert.equal(
+    formatLspShort({ active: 0, failed: 2 }, fakeTheme),
+    `<thinkingLow>${LSP_ICON} lsp 0|2</>`,
   );
 });
 
