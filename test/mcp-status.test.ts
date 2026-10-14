@@ -485,7 +485,7 @@ test("the settle schedule survives a context invalidated mid-flight", (t) => {
       t.mock.timers.tick((MCP_SETTLE_DELAYS_MS.at(-1) ?? 0) + 1);
     });
     assert.deepEqual(calls, []);
-    // Counts are still tracked — only the UI write is dropped.
+    // Counts are still tracked. Only the UI write is dropped.
     assert.deepEqual(currentMcpCounts(), { enabled: 1, disabled: 0 });
   } finally {
     off();
