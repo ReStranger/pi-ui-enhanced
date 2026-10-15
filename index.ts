@@ -11,6 +11,10 @@ import {
   restoreDefaultFooter,
 } from "./src/status-wrap.ts";
 import {
+  installRoundedPanels,
+  uninstallRoundedPanels,
+} from "./src/panel-frame.ts";
+import {
   registerMcpShortStatus,
   subscribeMcpServers,
 } from "./src/mcp-status.ts";
@@ -33,12 +37,17 @@ function ensureStatusWrap(pi: ExtensionAPI): void {
 	statusWrapReady = true;
 	disposables.push(registerMcpShortStatus());
 	disposables.push(registerLspShortStatus());
+	// Core draws its chat notices with `─` separators. Round them into the
+	// same ╭─╮ frame as the editor. The patch is process-wide, so one call
+	// covers every session.
+	installRoundedPanels();
 	// Track the MCP servers (registry + tool namespaces) and publish the short
 	// status from session_start / mcp_servers_change / agent_settled.
 	disposables.push(subscribeMcpServers(pi));
 }
 
 function disposeAll(): void {
+	uninstallRoundedPanels();
 	while (disposables.length > 0) {
 		const dispose = disposables.pop();
 		try {

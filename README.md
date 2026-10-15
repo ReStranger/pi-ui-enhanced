@@ -13,6 +13,12 @@ Terminal interface extension for the [pi coding agent](https://github.com/earend
 - Shows status indicators (spinner, retry count, compaction notice) in the border.
 - Preserves scroll indicators (`↑`, `↓`), mouse hit tests, and autocomplete menus.
 
+### Rounded chat notices
+
+- Frames pi's startup and info panels (`Package Updates Available`, new-version notices, `/changelog`, `/hotkeys`) with the same `╭─╮` / `╰─╯` border as the editor.
+- Keeps the color of the separator it replaces and re-wraps the content, so every line still fits the terminal width.
+- Frames static text only, so dialogs, tool output, loaders, and image panels keep their stock separators.
+
 ### Status line footer
 
 - Shows the current directory and Git branch.
