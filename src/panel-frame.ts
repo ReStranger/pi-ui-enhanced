@@ -3,6 +3,8 @@ import {
   truncateToWidth,
   visibleWidth,
   type Component,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 
 /**
@@ -26,16 +28,6 @@ export type BorderPainter = (text: string) => string;
 /** Fallback painter for separators that carry no color. */
 const noPaint: BorderPainter = (text) => text;
 
-/** Class names core uses for the panel separators and their content. */
-const RULE_CLASS_NAME = "DynamicBorder";
-const STATIC_CONTENT_CLASS_NAMES = new Set([
-  "Text",
-  "ThemedText",
-  "TruncatedText",
-  "Spacer",
-  "Markdown",
-]);
-
 /**
  * A notice panel holds a few children at most, so the backward walk gives up
  * after this many and never matches a separator higher up the transcript.
@@ -53,6 +45,15 @@ function classNameOf(candidate: unknown): string {
   return (candidate as ComponentShape).constructor?.name ?? "";
 }
 
+/** Class names core uses for the panel separators and their content. */
+const RULE_CLASS_NAME = "DynamicBorder";
+const STATIC_CONTENT_CLASS_NAMES = new Set([
+  "Text",
+  "ThemedText",
+  "TruncatedText",
+  "Spacer",
+  "Markdown",
+]);
 /** Horizontal separator created by core's `DynamicBorder`. */
 export function isRuleComponent(candidate: unknown): boolean {
   if (!candidate || typeof candidate !== "object") return false;
@@ -106,8 +107,8 @@ export class RoundedPanelBorder implements Component {
 
 /** Panel content with `│` on both sides. */
 export class PanelBody implements Component {
-  private readonly children: Component[];
-  private readonly paint: BorderPainter;
+  protected readonly children: Component[];
+  protected readonly paint: BorderPainter;
 
   constructor(children: Component[], paint: BorderPainter = noPaint) {
     this.children = children;
@@ -145,9 +146,76 @@ export class PanelBody implements Component {
   }
 }
 
+/** Panel content with `│` on both sides and mouse or input delegation. */
+export class InteractivePanelBody extends PanelBody {
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.y < 0 || event.y >= event.height) return undefined;
+    const innerWidth = Math.max(0, event.width - 2);
+    if (innerWidth <= 0) return undefined;
+
+    const isWheel = event.type === "wheel";
+    if (!isWheel && (event.x <= 0 || event.x > innerWidth)) {
+      return undefined;
+    }
+    const innerX = Math.max(0, Math.min(innerWidth - 1, event.x - 1));
+
+    let childY = 0;
+    for (const child of this.children) {
+      const childLines = child.render(innerWidth);
+      const childHeight = childLines ? childLines.length : 0;
+      if (event.y >= childY && event.y < childY + childHeight) {
+        const handler = (
+          child as {
+            handleMouse?: (e: TuiMouseEvent) => TuiMouseEventResult | undefined;
+          }
+        ).handleMouse;
+        if (typeof handler === "function") {
+          const result = handler.call(child, {
+            ...event,
+            x: innerX,
+            y: event.y - childY,
+            width: innerWidth,
+            height: childHeight,
+          });
+          if (result) {
+            return result;
+          }
+        }
+        return undefined;
+      }
+      childY += childHeight;
+    }
+    return undefined;
+  }
+
+  handleInput(data: string): void {
+    for (const child of this.children) {
+      const candidate = child as {
+        focused?: boolean;
+        handleInput?: (d: string) => void;
+      };
+      if (candidate.focused && typeof candidate.handleInput === "function") {
+        candidate.handleInput(data);
+        return;
+      }
+    }
+    for (const child of this.children) {
+      const handler = (
+        child as { handleInput?: (d: string) => void }
+      ).handleInput;
+      if (typeof handler === "function") {
+        handler.call(child, data);
+        return;
+      }
+    }
+  }
+}
+
 /**
- * Replaces a trailing `<rule> ...static content... <rule>` with a rounded
- * frame. Returns `true` when the separators were replaced.
+ * Replaces a trailing `<rule> ...content... <rule>` with a rounded frame.
+ * Static text uses `PanelBody`. Interactive controls like inputs or lists use
+ * `InteractivePanelBody` to translate mouse events and forward input.
+ * Returns `true` when the separators were replaced.
  */
 export function framePanelTail(children: Component[]): boolean {
   const bottomIndex = children.length - 1;
@@ -164,14 +232,17 @@ export function framePanelTail(children: Component[]): boolean {
   if (topIndex < 0) return false;
 
   const body = children.slice(topIndex + 1, bottomIndex);
-  if (!body.every(isStaticPanelContent)) return false;
-
   const paint = paintOf(children[bottomIndex]);
+  const isStatic = body.every(isStaticPanelContent);
+  const bodyComponent = isStatic
+    ? new PanelBody(body, paint)
+    : new InteractivePanelBody(body, paint);
+
   children.splice(
     topIndex,
     bottomIndex - topIndex + 1,
     new RoundedPanelBorder("top", paint),
-    new PanelBody(body, paint),
+    bodyComponent,
     new RoundedPanelBorder("bottom", paint),
   );
   return true;
