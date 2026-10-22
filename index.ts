@@ -19,6 +19,7 @@ import {
   subscribeMcpServers,
 } from "./src/mcp-status.ts";
 import { registerLspShortStatus } from "./src/lsp-status.ts";
+import { registerDcpShortStatus } from "./src/dcp-status.ts";
 
 // When loading with both `pi -e ./local-copy` and an installed package, two
 // instances of this module load into the process. Each instance builds its
@@ -37,6 +38,7 @@ function ensureStatusWrap(pi: ExtensionAPI): void {
 	statusWrapReady = true;
 	disposables.push(registerMcpShortStatus());
 	disposables.push(registerLspShortStatus());
+	disposables.push(registerDcpShortStatus());
 	// Core draws its chat notices with `─` separators. Round them into the
 	// same ╭─╮ frame as the editor. The patch is process-wide, so one call
 	// covers every session.

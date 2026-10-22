@@ -7,6 +7,7 @@ export * from "./status-wrap.ts";
 export * from "./panel-frame.ts";
 export * from "./mcp-status.ts";
 export * from "./lsp-status.ts";
+export * from "./dcp-status.ts";
 
 import {
   CustomEditor,

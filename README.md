@@ -16,6 +16,12 @@ Run the extension directly without modifying stored settings:
 pi install https://github.com/ReStranger/pi-ui-enhanced.git
 ```
 
+## Integration with third-party plugins in the footer UI:
+
+- built-in MCP
+- [`npm:pi-lens`](https://pi.dev/packages/pi-lens)
+- [`npm:@pi-vault/pi-dcp`](https://pi.dev/packages/@pi-vault/pi-dcp)
+
 ## Development
 
 Clone the repository and install dependencies:

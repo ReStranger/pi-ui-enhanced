@@ -7,6 +7,7 @@ import test from "node:test";
 import extension from "../index.ts";
 import { applyStatusRewrite } from "../src/status-wrap.ts";
 import { LSP_STATUS_KEY } from "../src/lsp-status.ts";
+import { DCP_STATUS_KEY } from "../src/dcp-status.ts";
 
 type Handler = (event: unknown, ctx: unknown) => void;
 
@@ -55,6 +56,11 @@ test("headless session_shutdown leaves shared status rewrites registered", () =>
   const rewritten = applyStatusRewrite(LSP_STATUS_KEY, raw, undefined);
   assert.notEqual(rewritten, raw, "rewrite should still be active after headless shutdown");
   assert.match(rewritten ?? "", /lsp 2/i);
+
+  const rawDcp = "DCP · saved ~268 tokens · pruned 4 outputs";
+  const rewrittenDcp = applyStatusRewrite(DCP_STATUS_KEY, rawDcp, undefined);
+  assert.notEqual(rewrittenDcp, rawDcp, "DCP rewrite should still be active after headless shutdown");
+  assert.match(rewrittenDcp ?? "", /dcp ~268 \(4\)/i);
 });
 
 test("interactive owner session_shutdown disposes shared status rewrites", () => {
@@ -71,4 +77,8 @@ test("interactive owner session_shutdown disposes shared status rewrites", () =>
   const raw = "LSP Active: foo, bar";
   const rewritten = applyStatusRewrite(LSP_STATUS_KEY, raw, undefined);
   assert.equal(rewritten, raw, "rewrite should be removed after interactive shutdown");
+
+  const rawDcp = "DCP · saved ~268 tokens · pruned 4 outputs";
+  const rewrittenDcp = applyStatusRewrite(DCP_STATUS_KEY, rawDcp, undefined);
+  assert.equal(rewrittenDcp, rawDcp, "DCP rewrite should be removed after interactive shutdown");
 });
